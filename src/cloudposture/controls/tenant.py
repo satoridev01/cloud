@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..context import EXTERNAL_COLLAB_URL, Tenant
+from .. import cvss
 from ..model import Affected, Finding, cisa, control
 
 GUEST_ROLES = {
@@ -28,6 +29,7 @@ def guest_invites(t: Tenant) -> list[Finding]:
         Finding(
             title="Guest invitations are open to " + ("everyone, including existing guests" if everyone else "every member"),
             severity="medium" if everyone else "low",
+            cvss=cvss.DIRECTORY_EXPOSURE if everyone else cvss.HARDENING,
             description=(
                 "Guest invite settings allow "
                 + ("any user — members and guests alike — " if everyone else "every member ")
@@ -62,6 +64,7 @@ def guest_access(t: Tenant) -> list[Finding]:
         Finding(
             title="Guests can browse the directory like members",
             severity="medium",
+            cvss=cvss.DIRECTORY_EXPOSURE,
             description=(
                 "Guest user access is set to 'same access as members', so any guest can enumerate every user, group "
                 "and their memberships — the map an attacker needs to target privileged accounts and craft "

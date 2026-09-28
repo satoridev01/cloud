@@ -330,6 +330,33 @@ class LocationTests(unittest.TestCase):
         self.assertEqual(line.split("\n"), [f"App {i}" for i in range(10)])
 
 
+class CvssTests(unittest.TestCase):
+    def test_scores_match_published_values(self):
+        from cloudposture.cvss import score
+
+        for vector, expected in [
+            ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", 9.8),
+            ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N", 6.1),
+            ("CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H", 7.8),
+            ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H", 9.0),
+        ]:
+            self.assertEqual(score(vector), expected, vector)
+
+    def test_every_finding_scores_in_its_severity_band(self):
+        data = base_data(**{"identity/conditionalAccess/policies": []})
+        data["policies/authorizationPolicy"].update(allowInvitesFrom="everyone", guestUserRoleId="a0b1b346-4d3e-4e8b-98f8-753987be4970")
+        data["policies/authorizationPolicy"]["defaultUserRolePermissions"].update(
+            allowedToCreateApps=True, permissionGrantPoliciesAssigned=["ManagePermissionGrantsForSelf.microsoft-user-default-legacy"]
+        )
+        doc = assess(data)
+        band = {"blocker": "critical", "critical": "critical", "high": "high", "medium": "medium", "low": "low"}
+        scored = [f for f in doc["findings"] if f["severity"] != "info"]
+        self.assertGreater(len(scored), 5)
+        for f in scored:
+            self.assertIn("cvss", f, f["id"])
+            self.assertEqual(f["cvss"]["rating"], band[f["severity"]], (f["id"], f["cvss"]))
+
+
 class DnsParsingTests(unittest.TestCase):
     def test_dmarc_tags(self):
         self.assertEqual(_tags("v=DMARC1; p=Reject; pct=50; rua=mailto:x@y")["p"], "reject")

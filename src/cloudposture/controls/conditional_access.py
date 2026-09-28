@@ -16,6 +16,7 @@ from ..context import (
     principal_url,
     role_url,
 )
+from .. import cvss
 from ..model import Affected, Finding, cisa, control, listing, maester
 
 PERMS = ("Policy.Read.All",)
@@ -173,6 +174,7 @@ def ca_without_effect(t: Tenant) -> list[Finding]:
         Finding(
             title="Conditional Access policies are switched on but protect nothing",
             severity="medium" if protective else "low",
+            cvss=cvss.WEAKENED_DEFENCE if protective else cvss.HARDENING,
             description=(
                 opening
                 + (consequence if protective else "")
@@ -208,6 +210,7 @@ def mfa_all_users(t: Tenant) -> list[Finding]:
             Finding(
                 title="MFA is skipped for sign-ins from trusted locations",
                 severity="medium",
+                cvss=cvss.TRUSTED_NETWORK_GAP,
                 description=(
                     "The tenant-wide MFA polic"
                     + ("y " if len(located) == 1 else "ies ")
@@ -241,6 +244,7 @@ def mfa_all_users(t: Tenant) -> list[Finding]:
         Finding(
             title="MFA is not required for every user and app",
             severity="high",
+            cvss=cvss.PASSWORD_TO_DATA,
             description=(
                 "Security defaults are off and no enabled Conditional Access policy requires multi-factor "
                 "authentication of all users for all cloud apps without narrowing conditions. "
@@ -291,6 +295,7 @@ def mfa_admins(t: Tenant) -> list[Finding]:
         Finding(
             title="Administrator roles can sign in without MFA",
             severity="critical",
+            cvss=cvss.TENANT_TAKEOVER,
             description=(
                 f"{len(uncovered)} privileged directory role(s) that have active members are not targeted by any "
                 "enabled Conditional Access policy requiring MFA for all apps: "
@@ -329,6 +334,7 @@ def legacy_auth(t: Tenant) -> list[Finding]:
         Finding(
             title="Legacy authentication protocols are not blocked",
             severity="high",
+            cvss=cvss.PASSWORD_TO_DATA,
             description=(
                 "No enabled Conditional Access policy blocks legacy authentication (Exchange ActiveSync and "
                 "'other clients' such as IMAP, POP, SMTP AUTH and older Office clients) for all users, and "
@@ -385,6 +391,7 @@ def azure_management(t: Tenant) -> list[Finding]:
         Finding(
             title="Azure management (portal, CLI, PowerShell, ARM) can be reached without MFA",
             severity="medium" if partial_cover else "high",
+            cvss=cvss.TRUSTED_NETWORK_ADMIN if partial_cover else cvss.PASSWORD_TO_DATA,
             description=(
                 (
                     "MFA for the 'Windows Azure Service Management API' (Azure portal, CLI, PowerShell, ARM) comes "
@@ -487,6 +494,7 @@ def password_only_accounts(t: Tenant) -> list[Finding]:
         Finding(
             title="Accounts can sign in with a password alone",
             severity=worst,
+            cvss=cvss.TENANT_TAKEOVER if worst == "critical" else cvss.PASSWORD_TO_DATA,
             description=(
                 f"{len(affected)} enabled account(s) are exempt from every Conditional Access policy that would "
                 "require MFA of them, so a stolen or guessed password is enough to sign in — from anywhere:\n"
@@ -560,6 +568,7 @@ def not_enforced(t: Tenant) -> list[Finding]:
         Finding(
             title="Policies that would require MFA or block access are not enforced",
             severity="low",
+            cvss=cvss.HARDENING,
             description=(
                 f"{len(idle)} polic{'y' if len(idle) == 1 else 'ies'} that require MFA or block access are "
                 "disabled or in report-only, so they log what they would do but enforce nothing: "
@@ -636,6 +645,7 @@ def risk_policies(t: Tenant) -> list[Finding]:
         Finding(
             title="Risky users and sign-ins are only logged, not blocked",
             severity="medium",
+            cvss=cvss.WEAKENED_DEFENCE,
             description=(
                 "Microsoft Entra ID Protection (included in the tenant's Entra ID P2) flags users and sign-ins it "
                 "believes are compromised — a password found in a leak, a sign-in from an anonymising network, "

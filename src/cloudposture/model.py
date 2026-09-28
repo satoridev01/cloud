@@ -74,6 +74,8 @@ class Finding:
     evidence: dict[str, Any] = field(default_factory=dict)
     # Set by the runner from the control, unless the control overrides it for this finding.
     resource: str | None = None
+    # CVSS v3.1 vector of the finding's attack scenario (see cvss.py); None for context-only findings.
+    cvss: str | None = None
 
 
 @dataclass

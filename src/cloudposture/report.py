@@ -12,6 +12,7 @@ from typing import Any
 
 from . import __version__
 from .context import Tenant
+from . import cvss
 from .model import REGISTRY, SEVERITIES, Control, Finding, NotApplicable, NotEvaluated, resource_line
 
 SCHEMA = "https://github.com/satoridev01/cloud#assessment-v1"
@@ -52,6 +53,11 @@ def _finding_json(c: Control, f: Finding, index: int, total: int) -> dict[str, A
         "remediation": f.remediation,
         "affected": [a.to_json() for a in f.affected],
         "evidence": f.evidence,
+        **(
+            {"cvss": {"version": "3.1", "vector": f.cvss, "score": cvss.score(f.cvss), "rating": cvss.rating(cvss.score(f.cvss))}}
+            if f.cvss
+            else {}
+        ),
         "references": [r.to_json() for r in c.references],
         **({"licence": c.licence} if c.licence else {}),
     }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..context import DOMAINS_URL, Tenant
 from ..dnsq import DnsError, txt
+from .. import cvss
 from ..model import Affected, Finding, control, maester
 
 
@@ -55,6 +56,7 @@ def dmarc(t: Tenant) -> list[Finding]:
         Finding(
             title="Email domains can be spoofed: DMARC is missing or not enforced",
             severity="medium",
+            cvss=cvss.SPOOFING,
             description=(
                 f"{len(affected)} verified email domain(s) do not publish an enforcing DMARC policy: "
                 + "; ".join(f"{a.name} — {a.detail['problem']}" for a in affected)
@@ -100,6 +102,7 @@ def spf(t: Tenant) -> list[Finding]:
         Finding(
             title="Email domains have no SPF record, or one that allows anyone",
             severity="high" if any("allows any sender" in a.detail["problem"] for a in affected) else "medium",
+            cvss=cvss.OPEN_SPOOFING if any("allows any sender" in a.detail["problem"] for a in affected) else cvss.SPOOFING,
             description=(
                 f"{len(affected)} verified email domain(s) have a missing, duplicated or permissive SPF record: "
                 + "; ".join(f"{a.name} — {a.detail['problem']}" for a in affected)

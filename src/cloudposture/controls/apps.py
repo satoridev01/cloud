@@ -13,6 +13,7 @@ from ..context import (
     parse_time,
     sp_url,
 )
+from .. import cvss
 from ..model import Affected, Finding, atomic_names, cisa, control, listing, maester
 
 # What each application permission lets an app do, in words. TAKEOVER reaches Global Administrator,
@@ -142,6 +143,7 @@ def takeover_apps(t: Tenant) -> list[Finding]:
         Finding(
             title="Applications can take over the tenant or switch off its defences",
             severity="critical" if tier0 else "high",
+            cvss=cvss.TENANT_TAKEOVER if tier0 else cvss.PASSWORD_TO_DATA,
             description=(
                 f"{len(affected)} application(s) hold Microsoft Graph application permissions that act without a "
                 "signed-in user and can take control of the tenant or disable its protections"
@@ -192,6 +194,7 @@ def data_apps(t: Tenant) -> list[Finding]:
         Finding(
             title="Applications can read or change content across the whole organisation",
             severity="high",
+            cvss=cvss.PASSWORD_TO_DATA,
             description=(
                 f"{len(affected)} application(s) hold tenant-wide data permissions, not limited to particular "
                 "mailboxes, sites or users:\n"
@@ -231,6 +234,7 @@ def user_consent(t: Tenant) -> list[Finding]:
         Finding(
             title="Users can grant applications access to their data",
             severity=severity,
+            cvss=cvss.CONSENT_PHISHING if legacy else cvss.HARDENING_USER,
             description=(
                 f"The user consent setting lets any user consent to {what}. Illicit consent grants are a common "
                 "Microsoft 365 attack: a phishing link asks the user to approve an app, which then reads their mail "
@@ -264,6 +268,7 @@ def app_registration(t: Tenant) -> list[Finding]:
         Finding(
             title="Any user can register applications",
             severity="low",
+            cvss=cvss.HARDENING,
             description=(
                 "Every member can create app registrations. An attacker holding one user account can register an "
                 "app, add credentials to it and use it as a persistent, MFA-free foothold, or dress it up for a "
@@ -307,6 +312,7 @@ def app_secrets(t: Tenant) -> list[Finding]:
         Finding(
             title="App registrations use long-lived or leftover expired client secrets",
             severity="low",
+            cvss=cvss.HARDENING,
             description=(
                 f"{len(affected)} app registration(s) have client secrets valid for more than two years, or expired "
                 "secrets still attached: " + listing([a.name for a in affected])

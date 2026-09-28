@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..context import AUTH_METHODS_URL, Tenant, display, user_url
+from .. import cvss
 from ..model import Affected, Finding, cis, cisa, control, listing, maester
 
 WEAK = {"Sms": "SMS", "Voice": "Voice call", "Email": "Email one-time passcode"}
@@ -39,6 +40,7 @@ def weak_methods(t: Tenant) -> list[Finding]:
         Finding(
             title="SMS, voice-call or email codes are allowed as sign-in methods",
             severity="medium",
+            cvss=cvss.PHISHABLE_MFA,
             description=(
                 "The authentication methods policy enables "
                 + listing([f"{a.name} (for {a.detail['enabledFor']})" for a in affected])
@@ -83,6 +85,7 @@ def members_without_mfa(t: Tenant) -> list[Finding]:
         Finding(
             title="Enabled member accounts have no MFA method registered",
             severity="high",
+            cvss=cvss.PASSWORD_TO_DATA,
             description=(
                 f"{len(missing)} of {members} enabled member accounts have not registered any MFA method: "
                 + listing([a.name for a in missing])
@@ -118,6 +121,7 @@ def phishing_resistant(t: Tenant) -> list[Finding]:
         Finding(
             title="Phishing-resistant sign-in (passkeys, FIDO2, certificates) is not available",
             severity="low",
+            cvss=cvss.HARDENING_USER,
             description=(
                 "Neither FIDO2 security keys / passkeys nor certificate-based authentication is enabled in the "
                 "authentication methods policy, so users cannot register a factor that resists adversary-in-the-"

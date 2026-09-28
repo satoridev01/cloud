@@ -95,6 +95,11 @@ Satori's scale, decided by what an attacker gets, not by which framework lists t
 | `low` | Hardening and hygiene. |
 | `info` | Context, such as missing licences, not a weakness. |
 
+Every finding except `info` also carries a **CVSS v3.1** base vector describing its own attack scenario
+(a misconfiguration has no CVE), with the score computed from the specification's formula. The vectors
+are chosen so the CVSS rating matches the severity: 9.0+ critical, 7.0–8.9 high, 4.0–6.9 medium,
+below 4.0 low.
+
 ## Output
 
 ```jsonc
@@ -118,6 +123,7 @@ Satori's scale, decided by what an attacker gets, not by which framework lists t
       "remediation": "Finished prose: the steps and admin-centre path to fix it.",
       "affected": [ { "type": "conditionalAccessPolicy", "id": "…", "name": "…", "portalUrl": "https://entra.microsoft.com/…", "detail": {} } ],
       "evidence": { },
+      "cvss": { "version": "3.1", "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H", "score": 9.0, "rating": "critical" },
       "references": [ { "framework": "Maester", "id": "MT.1184", "url": "…" } ]
     }
   ]

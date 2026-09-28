@@ -16,6 +16,7 @@ from ..context import (
     sp_url,
     user_url,
 )
+from .. import cvss
 from ..model import Affected, Finding, NotEvaluated, cis, cisa, control, listing, maester
 
 PERMS = ("RoleManagement.Read.Directory", "Directory.Read.All")
@@ -75,6 +76,7 @@ def global_admin_count(t: Tenant) -> list[Finding]:
             if few
             else f"{len(users)} users hold Global Administrator",
             severity="low" if few else "medium",
+            cvss=cvss.AVAILABILITY if few else cvss.WEAKENED_DEFENCE,
             description=(
                 (
                     f"{len(users)} user account(s) hold an active Global Administrator assignment"
@@ -147,6 +149,7 @@ def sp_with_roles(t: Tenant) -> list[Finding]:
         Finding(
             title="Applications hold administrator roles in the directory",
             severity="critical" if tier0 else "high",
+            cvss=cvss.TENANT_TAKEOVER if tier0 else cvss.PASSWORD_TO_DATA,
             description=(
                 f"{len(affected)} service principal(s) hold privileged directory roles: "
                 + listing([f"{a.name} ({', '.join(a.detail['roles'])})" for a in affected])
@@ -193,7 +196,9 @@ def synced_admins(t: Tenant) -> list[Finding]:
     return [
         Finding(
             title="Administrator accounts are synchronised from on-premises Active Directory",
-            severity="critical" if any(_tier(r["roles"]) == 0 for r in rows) else "high",
+            # Reaching these accounts needs the on-premises domain first, hence high rather than critical.
+            severity="high" if any(_tier(r["roles"]) == 0 for r in rows) else "medium",
+            cvss=cvss.ONPREM_TO_CLOUD if any(_tier(r["roles"]) == 0 for r in rows) else cvss.ONPREM_TO_CLOUD_LIMITED,
             description=(
                 f"{len(affected)} account(s) with privileged Entra roles are synchronised from on-premises Active "
                 "Directory: " + listing([f"{a.name} ({', '.join(a.detail['roles'])})" for a in affected])
@@ -244,6 +249,7 @@ def stale_admins(t: Tenant) -> list[Finding]:
         Finding(
             title=f"Privileged accounts have not signed in for {STALE_DAYS}+ days",
             severity="medium",
+            cvss=cvss.WEAKENED_DEFENCE,
             description=(
                 f"{len(affected)} account(s) with privileged roles show no sign-in in the last {STALE_DAYS} days: "
                 + listing([f"{a.name} ({', '.join(a.detail['roles'])}, " + ("never signed in" if a.detail["daysInactive"] is None else f"{a.detail['daysInactive']} days") + ")" for a in affected])
@@ -295,6 +301,11 @@ def admins_without_mfa(t: Tenant) -> list[Finding]:
         Finding(
             title="Administrators have no MFA, or only phishable MFA, registered",
             severity=("critical" if any(_tier_of(t, a.id) == 0 for a in none) else "high") if none else "medium",
+            cvss=(
+                (cvss.TENANT_TAKEOVER if any(_tier_of(t, a.id) == 0 for a in none) else cvss.PASSWORD_TO_DATA)
+                if none
+                else cvss.PHISHABLE_ADMIN_MFA
+            ),
             description=(
                 "Of the accounts holding privileged roles, " + "; ".join(parts) + ". An administrator without a "
                 "registered method can be registered by whoever signs in first with the password; SMS and voice "
@@ -341,6 +352,7 @@ def permanent_assignments(t: Tenant) -> list[Finding]:
         Finding(
             title="Highly privileged roles are assigned permanently instead of through PIM",
             severity="low",
+            cvss=cvss.STANDING_ACCESS,
             description=(
                 f"{len(affected)} user(s) hold a tenant-takeover role as a permanent active assignment although the "
                 "tenant has Entra ID P2 (Privileged Identity Management): "

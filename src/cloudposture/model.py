@@ -131,10 +131,14 @@ def listing(names: list[str], limit: int = 5) -> str:
     return f"{', '.join(shown[:-1])} and {shown[-1]}"
 
 
+LOCATION_LIMIT = 30
+
+
 def resource_line(noun: str, plural: str, affected: list[Affected]) -> str:
     """The one-line location of a finding: the object, or how many and which."""
     if not affected:
         return noun
     if len(affected) == 1:
         return f"{noun}: {affected[0].name}"
-    return f"{len(affected)} {plural}: {listing([a.name for a in affected])}"
+    # The location names every object; only a very long list is cut (the rest stay in `affected`).
+    return f"{len(affected)} {plural}: {listing([a.name for a in affected], limit=LOCATION_LIMIT)}"

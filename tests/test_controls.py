@@ -271,6 +271,17 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(ranks, sorted(ranks))
 
 
+class LocationTests(unittest.TestCase):
+    def test_location_names_every_object(self):
+        from cloudposture.model import Affected, resource_line
+
+        objs = [Affected("servicePrincipal", str(i), f"App {i}") for i in range(10)]
+        line = resource_line("Application", "applications", objs)
+        self.assertTrue(line.startswith("10 applications: App 0, "))
+        self.assertIn("App 9", line)
+        self.assertNotIn("more", line)
+
+
 class DnsParsingTests(unittest.TestCase):
     def test_dmarc_tags(self):
         self.assertEqual(_tags("v=DMARC1; p=Reject; pct=50; rua=mailto:x@y")["p"], "reject")

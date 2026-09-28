@@ -254,6 +254,14 @@ class AuthAndAppsTests(unittest.TestCase):
         self.assertEqual(f["resource"].split("\n"), ["Mail Tool (appId app-0)", "Mail Tool (appId app-1)"])
         self.assertIn("forwarding rules", f["description"])
 
+    def test_capabilities_skip_permissions_a_broader_one_includes(self):
+        graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "r", "value": "Mail.Read"}, {"id": "rw", "value": "Mail.ReadWrite"}]}
+        app = {"id": "sp-m", "appId": "app-m", "displayName": "Mailer", "appOwnerOrganizationId": "99999999-0000-0000-0000-000000000000"}
+        data = base_data(servicePrincipals=[graph_sp, app], grants=[{"principalId": "sp-m", "appRoleId": "r"}, {"principalId": "sp-m", "appRoleId": "rw"}])
+        detail = finding(assess(data), "M365-APP-05")["affected"][0]["detail"]
+        self.assertEqual(detail["canDo"], ["read and change mail in every mailbox"])
+        self.assertEqual(detail["permissions"], ["Mail.Read", "Mail.ReadWrite"])
+
     def test_legacy_user_consent_is_high(self):
         data = base_data()
         data["policies/authorizationPolicy"]["defaultUserRolePermissions"]["permissionGrantPoliciesAssigned"] = ["ManagePermissionGrantsForSelf.microsoft-user-default-legacy"]

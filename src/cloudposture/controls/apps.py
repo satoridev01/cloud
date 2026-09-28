@@ -45,6 +45,14 @@ DATA = {
     "Group.ReadWrite.All": "create, change and delete groups and Teams",
     "GroupMember.ReadWrite.All": "change the membership of any group",
 }
+# A permission a broader one already includes: listing both would say the same thing twice.
+SUBSUMED_BY = {
+    "Mail.Read": ("Mail.ReadWrite", "full_access_as_app"),
+    "Mail.ReadWrite": ("full_access_as_app",),
+    "Files.Read.All": ("Files.ReadWrite.All",),
+    "Sites.Read.All": ("Sites.ReadWrite.All", "Sites.FullControl.All"),
+    "Sites.ReadWrite.All": ("Sites.FullControl.All",),
+}
 LONG_SECRET_DAYS = 730
 
 
@@ -88,7 +96,9 @@ def _app_affected(t: Tenant, sp: dict, perms: list[str], meanings: dict[str, str
         sp_url(sp["id"], sp.get("appId")),
         {
             "appId": sp.get("appId"),
-            "canDo": [meanings[p] for p in perms if p in meanings],
+            "canDo": [
+                meanings[p] for p in perms if p in meanings and not set(SUBSUMED_BY.get(p, ())) & set(perms)
+            ],
             "permissions": [p for p in perms if p in meanings],
             "publisher": owner,
             **t.credentials(sp),

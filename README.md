@@ -59,7 +59,7 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-CA-03` | Conditional Access | MFA is not required for administrator roles | — | CISA SCuBA MS.AAD.3.6 |
 | `M365-CA-04` | Conditional Access | Legacy authentication is not blocked | — | CISA SCuBA MS.AAD.1.1 |
 | `M365-CA-05` | Conditional Access | Azure management is not protected by MFA | — | Maester MT.1184 |
-| `M365-CA-06` | Conditional Access | Accounts and groups excluded from MFA or block policies | — | Maester MT.1005, Maester MT.1036 |
+| `M365-CA-06` | Conditional Access | Accounts that sign in with a password alone | — | Maester MT.1005, Maester MT.1036 |
 | `M365-CA-07` | Conditional Access | Protective Conditional Access policies left in report-only or disabled | — | Maester MT.1184 |
 | `M365-CA-08` | Conditional Access | Risky users and risky sign-ins are not challenged or blocked | Entra ID P2 | CISA SCuBA MS.AAD.2.1, CISA SCuBA MS.AAD.2.3, Maester MT.1012, Maester MT.1024.userRiskPolicy |
 | `M365-PRV-01` | Privileged access | Global Administrator count outside 2–8 | — | CISA SCuBA MS.AAD.7.1, CIS Microsoft 365 Foundations 1.1.3, Maester MT.1024.oneAdmin |
@@ -71,7 +71,7 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-AUT-01` | Authentication methods | Phishable authentication methods (SMS, voice, email OTP) are enabled | — | CISA SCuBA MS.AAD.3.5, CIS Microsoft 365 Foundations 5.2.3.5, Maester EIDSCA.AV01 |
 | `M365-AUT-02` | Authentication methods | Member accounts without any MFA method registered | Entra ID P1 | Maester MT.1024.mfaRegistrationV2 |
 | `M365-AUT-03` | Authentication methods | No phishing-resistant authentication method is enabled | — | CISA SCuBA MS.AAD.3.1, Maester EIDSCA.AF01 |
-| `M365-APP-01` | Applications | Applications that can take over the tenant | — | Maester MT.1186 |
+| `M365-APP-01` | Applications | Applications that can take over the tenant or switch off its defences | — | Maester MT.1186 |
 | `M365-APP-05` | Applications | Applications with access to everyone's mail, files or chats | — | — |
 | `M365-APP-02` | Applications | Users can consent to applications | — | CISA SCuBA MS.AAD.5.2 |
 | `M365-APP-03` | Applications | Users can register applications | — | CISA SCuBA MS.AAD.5.1 |
@@ -81,6 +81,19 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-LIC-01` | Licensing | Identity protection and PIM are not licensed | — | — |
 | `M365-DOM-01` | Mail domains | Email domains without an enforcing DMARC policy | — | Maester MT.1182 |
 | `M365-DOM-02` | Mail domains | Email domains without a strict SPF record | — | — |
+
+## Severity
+
+Satori's scale, decided by what an attacker gets, not by which framework lists the control:
+
+| Severity | Meaning |
+|---|---|
+| `blocker` | Exploitable now, with nothing to steal first. |
+| `critical` | One stolen credential — an app's secret, a vendor's access, a sprayed administrator password — gives control of the tenant. |
+| `high` | One stolen password gives access to the organisation's data with no second factor, or an app holds tenant-wide access to it. |
+| `medium` | A defence is weaker than it should be, but exploiting it takes more than one step. |
+| `low` | Hardening and hygiene. |
+| `info` | Context, such as missing licences, not a weakness. |
 
 ## Output
 
@@ -99,7 +112,7 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
       "control": "M365-CA-01",
       "category": "Conditional Access",
       "title": "Conditional Access policies are switched on but protect nothing",
-      "severity": "critical|high|medium|low|info",
+      "severity": "blocker|critical|high|medium|low|info",
       "resource": "Conditional Access policy: CA04 - Azure Management: Require MFA   (several objects: one per line)",
       "description": "Finished prose: what is wrong here, with names and counts, and why it matters.",
       "remediation": "Finished prose: the steps and admin-centre path to fix it.",

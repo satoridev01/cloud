@@ -237,6 +237,26 @@ class Tenant:
             "certificates": len(source.get("keyCredentials") or []),
         }
 
+    def group_members(self, group_id: str) -> set[str]:
+        """Every user in a group, nested groups included (cached per group)."""
+        cache = self.__dict__.setdefault("_group_members", {})
+        if group_id not in cache:
+            rows = self._read(
+                "group membership",
+                lambda: list(self.graph.list(f"groups/{group_id}/transitiveMembers?$select=id&$top=999")),
+            )
+            cache[group_id] = {r["id"] for r in rows if r.get("@odata.type", "").endswith("user")}
+        return cache[group_id]
+
+    def group_name(self, group_id: str) -> str:
+        cache = self.__dict__.setdefault("_group_names", {})
+        if group_id not in cache:
+            try:
+                cache[group_id] = self.graph.get(f"groups/{group_id}?$select=displayName").get("displayName") or group_id
+            except Exception:  # noqa: BLE001 — a name is cosmetic; the id still identifies the group
+                cache[group_id] = group_id
+        return cache[group_id]
+
     @cached_property
     def domains(self) -> list[dict[str, Any]]:
         return self._read("domains", lambda: list(self.graph.list("domains")))

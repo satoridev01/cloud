@@ -172,7 +172,7 @@ def ca_without_effect(t: Tenant) -> list[Finding]:
     return [
         Finding(
             title="Conditional Access policies are switched on but protect nothing",
-            severity="high" if protective else "medium",
+            severity="medium" if protective else "low",
             description=(
                 opening
                 + (consequence if protective else "")
@@ -290,7 +290,7 @@ def mfa_admins(t: Tenant) -> list[Finding]:
     return [
         Finding(
             title="Administrator roles can sign in without MFA",
-            severity="high",
+            severity="critical",
             description=(
                 f"{len(uncovered)} privileged directory role(s) that have active members are not targeted by any "
                 "enabled Conditional Access policy requiring MFA for all apps: "
@@ -411,63 +411,130 @@ def azure_management(t: Tenant) -> list[Finding]:
     ]
 
 
+def _mfa_coverage(t: Tenant) -> list[dict[str, Any]]:
+    """Enabled policies that require MFA for all apps, of everyone or of certain roles (a trusted-location
+    exemption allowed: M365-CA-02 reports that gap on its own)."""
+    return [
+        p
+        for p in t.ca_policies
+        if enabled(p) and enforces_mfa(p) and all_apps(p) and unconditional(p, allow_trusted_locations=True)
+        and (all_users(p) or _cond(p, "users", "includeRoles"))
+    ]
+
+
 @control(
     "M365-CA-06",
-    "Accounts and groups excluded from MFA or block policies",
+    "Accounts that sign in with a password alone",
     "Conditional Access",
-    permissions=PERMS + ("Directory.Read.All",),
+    permissions=PERMS + ("Directory.Read.All", "GroupMember.Read.All"),
     references=(maester("MT.1005"), maester("MT.1036")),
 )
-def exclusions(t: Tenant) -> list[Finding]:
-    guarded = [p for p in t.ca_policies if enabled(p) and (enforces_mfa(p) or blocks(p))]
-    excluded: dict[str, list[str]] = {}
-    for p in guarded:
+def password_only_accounts(t: Tenant) -> list[Finding]:
+    coverage = _mfa_coverage(t)
+    if t.security_defaults or not coverage:
+        return []  # No MFA policy at all is M365-CA-02's finding, for every account.
+    roles: dict[str, set[str]] = {}
+    for a in t.role_assignments:
+        pid = (a.get("principal") or {}).get("id") or a.get("principalId")
+        if pid:
+            roles.setdefault(pid, set()).add(t.role_template(a))
+
+    def via(p: dict[str, Any], uid: str) -> str | None:
         users = _cond(p, "users") or {}
-        for oid in (users.get("excludeUsers") or []) + (users.get("excludeGroups") or []):
-            excluded.setdefault(oid, []).append(p.get("displayName", p["id"]))
-    if not excluded:
-        return []
-    objects = t.resolve_names(list(excluded))
-    affected = []
-    for oid, policies in sorted(excluded.items(), key=lambda kv: -len(kv[1])):
-        obj = objects.get(oid, {"id": oid})
-        affected.append(
-            Affected(
-                principal_kind(obj),
-                oid,
-                display(obj) if obj.get("displayName") else oid,
-                principal_url(obj) if obj.get("@odata.type") else None,
-                {"excludedFrom": policies, "excludedFromCount": len(policies), "ofProtectivePolicies": len(guarded)},
+        if uid in (users.get("excludeUsers") or []):
+            return "excluded directly"
+        for gid in users.get("excludeGroups") or []:
+            if uid in t.group_members(gid):
+                return f"excluded through group {t.group_name(gid)}"
+        if roles.get(uid, set()) & set(users.get("excludeRoles") or []):
+            return "excluded through a role it holds"
+        return None
+
+    def in_scope(p: dict[str, Any], uid: str) -> bool:
+        return all_users(p) or bool(roles.get(uid, set()) & set(_cond(p, "users", "includeRoles") or []))
+
+    registered = _safe_registration(t)
+    affected, worst = [], "high"
+    for uid, user in t.users.items():
+        if user.get("userType") != "Member" or not user.get("accountEnabled"):
+            continue
+        scoped = [p for p in coverage if in_scope(p, uid)]
+        reasons = [via(p, uid) for p in scoped]
+        if scoped and all(reasons):
+            held = sorted(PRIVILEGED_ROLES[r][0] for r in roles.get(uid, set()) if r in PRIVILEGED_ROLES)
+            mfa = registered.get(uid)
+            if held and mfa is False:
+                worst = "critical"
+            affected.append(
+                Affected(
+                    "user",
+                    uid,
+                    display(user),
+                    principal_url({"@odata.type": "#microsoft.graph.user", "id": uid}),
+                    {
+                        "why": sorted(set(reasons)),
+                        "privilegedRoles": held,
+                        "mfaRegistered": mfa,
+                        "syncedFromOnPremises": bool(user.get("onPremisesSyncEnabled")),
+                    },
+                )
             )
-        )
-    groups = [a for a in affected if a.type == "group"]
+    if not affected:
+        return []
+    admins = [a for a in affected if a.detail["privilegedRoles"]]
+    unregistered = [a for a in affected if a.detail["mfaRegistered"] is False]
     return [
         Finding(
-            title="Accounts and groups are exempt from MFA or block policies",
-            severity="medium",
+            title="Accounts can sign in with a password alone",
+            severity=worst,
             description=(
-                f"{len(affected)} account(s) or group(s) are excluded from one or more of the {len(guarded)} enabled "
-                "policies that require MFA or block access. Most excluded: "
-                + listing([f"{a.name} (excluded from {a.detail['excludedFromCount']})" for a in affected[:5]])
-                + ". Exclusions are expected only for two dedicated, cloud-only emergency-access accounts; any "
-                "other exclusion is an account that signs in without the protection the policy provides"
-                + (
-                    f", and {len(groups)} of them are groups, whose membership can grow silently."
-                    if groups
-                    else "."
+                f"{len(affected)} enabled account(s) are exempt from every Conditional Access policy that would "
+                "require MFA of them, so a stolen or guessed password is enough to sign in — from anywhere:\n"
+                + "\n".join(
+                    f"- {a.name}: {'; '.join(a.detail['why'])}"
+                    + (f"; holds {', '.join(a.detail['privilegedRoles'])}" if a.detail["privilegedRoles"] else "")
+                    + ("; no MFA method registered" if a.detail["mfaRegistered"] is False else "")
+                    + "."
+                    for a in affected
                 )
+                + "\n"
+                + (
+                    f"{len(unregistered)} of them have not even registered an MFA method. "
+                    if unregistered
+                    else ""
+                )
+                + (
+                    "An administrator account may be a deliberate emergency-access (break-glass) account; if so it "
+                    "must still use a phishing-resistant credential kept offline and raise an alert on every "
+                    "sign-in. "
+                    if admins
+                    else ""
+                )
+                + "Room, shared and service accounts in this list should not be able to sign in interactively at all."
             ),
             remediation=(
-                "Review each excluded object in its policies (Conditional Access > policy > Users > Exclude). Keep "
-                "exclusions only for the emergency-access accounts, which should be cloud-only, have no mailbox, "
-                "use phishing-resistant credentials and trigger an alert on every sign-in. Remove the rest, or "
-                "give them a fallback policy that still requires MFA. Replace excluded groups by the specific "
-                "emergency accounts."
+                "For each account: if it is a room, shared or service account, block sign-in (Users > account > "
+                "Edit properties > Account enabled = No, or 'Block sign in' for shared mailboxes) and move any "
+                "service to a managed identity or an app registration with a certificate. If it is a person, "
+                "remove the exclusion (take it out of the excluded group, or the group out of the policy's "
+                "Exclude list) so the MFA policy applies. Keep at most two emergency-access accounts excluded, "
+                "with FIDO2 keys and sign-in alerts, and review exclusion groups' membership regularly."
             ),
             affected=affected,
-            evidence={"exclusions": excluded},
+            evidence={
+                "mfaPolicies": [p.get("displayName") for p in coverage],
+                "accounts": {a.id: a.detail for a in affected},
+            },
         )
     ]
+
+
+def _safe_registration(t: Tenant) -> dict[str, bool]:
+    """user id → whether an MFA method is registered, when the P1 report is readable."""
+    try:
+        return {uid: bool(r.get("isMfaRegistered")) for uid, r in t.registration_details.items()}
+    except Exception:  # noqa: BLE001 — without the report the finding just omits the column
+        return {}
 
 
 @control(
@@ -532,50 +599,73 @@ def risk_policies(t: Tenant) -> list[Finding]:
     if user_risk and signin_risk:
         return []
     drafts = [
-        p for p in t.ca_policies
+        p
+        for p in t.ca_policies
         if p.get("state") != "enabled" and ((_cond(p, "userRiskLevels") or []) or (_cond(p, "signInRiskLevels") or []))
     ]
     scoped = [
         p for p in t.ca_policies
         if enabled(p) and not all_users(p) and ((_cond(p, "userRiskLevels") or []) or (_cond(p, "signInRiskLevels") or []))
     ]
-    gaps = []
+    state_label = {"enabledForReportingButNotEnforced": "report-only: logs, does not block", "disabled": "disabled"}
+    affected = [
+        Affected(
+            "conditionalAccessPolicy",
+            p["id"],
+            f"{p.get('displayName')} ({state_label.get(p.get('state'), p.get('state'))})",
+            policy_url(p["id"]),
+            {"state": p.get("state"), "scope": scope(p)},
+        )
+        for p in drafts
+    ] + [
+        Affected(
+            "conditionalAccessPolicy",
+            p["id"],
+            f"{p.get('displayName')} (on, but only for {scope(p).split(',')[0]})",
+            policy_url(p["id"]),
+            {"state": p.get("state"), "scope": scope(p)},
+        )
+        for p in scoped
+    ]
+    missing = []
     if not user_risk:
-        gaps.append("no enabled policy blocks or forces a password change for high-risk users")
+        missing.append("block (or force a password change for) users it rates high-risk")
     if not signin_risk:
-        gaps.append("no enabled policy requires MFA or blocks high-risk sign-ins for all users")
+        missing.append("challenge or block sign-ins it rates high-risk")
     return [
         Finding(
-            title="Identity Protection risk signals are not acted on",
-            severity="high",
+            title="Risky users and sign-ins are only logged, not blocked",
+            severity="medium",
             description=(
-                "The tenant has Entra ID P2, so Identity Protection scores users and sign-ins for risk (leaked "
-                "credentials, impossible travel, token anomalies), but " + " and ".join(gaps) + ". "
+                "Microsoft Entra ID Protection (included in the tenant's Entra ID P2) flags users and sign-ins it "
+                "believes are compromised — a password found in a leak, a sign-in from an anonymising network, "
+                "impossible travel. Conditional Access is what turns those flags into action, but no enabled policy "
+                "covering all users is set to " + " or to ".join(missing) + ". "
                 + (
-                    "Risk policies exist only in report-only or disabled state: "
-                    + listing([f"'{p.get('displayName')}' ({p.get('state')})" for p in drafts])
-                    + ". "
+                    "The policies written for this exist but are only in report-only mode or disabled, so they log "
+                    "what they would do and let the sign-in through. "
                     if drafts
                     else ""
                 )
-                + (
-                    "Others apply to a subset of users only: " + listing([f"'{p.get('displayName')}'" for p in scoped]) + ". "
-                    if scoped
-                    else ""
-                )
-                + "A sign-in Microsoft already flags as compromised is therefore let through."
+                + ("Another applies to a subset of users only. " if scoped else "")
+                + "A sign-in Microsoft already considers compromised is therefore treated like any other; MFA, "
+                "where required, is the only thing left in the way."
             ),
             remediation=(
-                "Turn the risk policies on for all users (excluding only emergency-access accounts): user risk = "
-                "High → Require password change (with MFA), or Block; sign-in risk = Medium and above → Require MFA, "
-                "High → Block. Check each policy's report-only impact in the sign-in logs first, and make sure users "
-                "are registered for MFA and self-service password reset so they can remediate their own risk."
+                "Switch the report-only risk policies to On for all users (exclude only the emergency-access "
+                "accounts): user risk High → Require password change (with MFA) or Block; sign-in risk Medium and "
+                "High → Require MFA, High → Block. First check each policy's report-only results in the sign-in "
+                "logs, and make sure users can complete MFA and self-service password reset, so they can clear "
+                "their own risk."
             ),
-            affected=[policy_affected(p, state=p.get("state"), scope=scope(p)) for p in drafts + scoped]
+            affected=affected
             or [Affected("tenantSetting", "riskPolicies", "Risk-based Conditional Access", CA_POLICIES_URL)],
-            evidence={"userRiskEnforced": [p["id"] for p in user_risk], "signInRiskEnforced": [p["id"] for p in signin_risk], "draftPolicies": [policy_evidence(p) for p in drafts]},
+            evidence={
+                "userRiskEnforced": [p["id"] for p in user_risk],
+                "signInRiskEnforced": [p["id"] for p in signin_risk],
+                "draftPolicies": [policy_evidence(p) for p in drafts],
+            },
         )
     ]
-
 
 __all__ = ["baseline_mfa", "enforces_mfa", "blocks", "has_resources", "SECURITY_DEFAULTS_URL"]

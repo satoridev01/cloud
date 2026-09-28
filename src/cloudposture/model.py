@@ -9,7 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-SEVERITIES = ("critical", "high", "medium", "low", "info")
+# Satori's scale. blocker: exploitable now, with nothing to steal first. critical: one stolen
+# credential (an app secret, a vendor, a sprayed admin password) gives control of the tenant. high: one
+# stolen password gives access to company data with no second factor. medium: a defence is weaker than
+# it should be but exploiting it needs more. low: hardening. info: context, not a weakness.
+SEVERITIES = ("blocker", "critical", "high", "medium", "low", "info")
 
 
 class NotEvaluated(Exception):
@@ -105,8 +109,13 @@ def control(
     return wrap
 
 
+# Current version of each SCuBA Entra ID policy: its heading, hence its anchor, carries it.
+CISA_VERSIONS = {"MS.AAD.3.2": 2, "MS.AAD.3.3": 2, "MS.AAD.3.5": 2}
+
+
 def cisa(id: str) -> Reference:
-    return Reference("CISA SCuBA", id, "https://github.com/cisagov/ScubaGear/blob/main/PowerShell/ScubaGear/baselines/aad.md")
+    anchor = id.lower().replace(".", "") + f"v{CISA_VERSIONS.get(id, 1)}"
+    return Reference("CISA SCuBA", id, f"https://github.com/cisagov/ScubaGear/blob/main/PowerShell/ScubaGear/baselines/aad.md#{anchor}")
 
 
 def cis(id: str) -> Reference:

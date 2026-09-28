@@ -13,10 +13,18 @@ from ..context import (
     parse_time,
     sp_url,
 )
-from ..model import Affected, Finding, atomic_names, cisa, control, maester
+from ..model import Affected, Finding, atomic_names, cisa, control, listing, maester
 
 # What each application permission lets an app do, in words. TAKEOVER reaches Global Administrator,
-# directly or in one step; DATA reads or changes everyone's content.
+# directly or in one step (TIER0), or can switch off the tenant's defences; DATA reads or changes
+# everyone's content.
+TIER0 = {
+    "RoleManagement.ReadWrite.Directory",
+    "AppRoleAssignment.ReadWrite.All",
+    "Application.ReadWrite.All",
+    "UserAuthenticationMethod.ReadWrite.All",
+    "Domain.ReadWrite.All",
+}
 TAKEOVER = {
     "RoleManagement.ReadWrite.Directory": "assign any directory role, including Global Administrator",
     "AppRoleAssignment.ReadWrite.All": "grant itself or any app any API permission",
@@ -25,7 +33,7 @@ TAKEOVER = {
     "Policy.ReadWrite.ConditionalAccess": "change or switch off Conditional Access policies",
     "Policy.ReadWrite.AuthenticationMethod": "change which sign-in methods the tenant allows",
     "UserAuthenticationMethod.ReadWrite.All": "add or reset any user's MFA methods",
-    "Domain.ReadWrite.All": "add or federate domains",
+    "Domain.ReadWrite.All": "add or federate a domain, and so sign in as any of its users",
     "Organization.ReadWrite.All": "change tenant-wide organisation settings",
 }
 DATA = {
@@ -119,7 +127,7 @@ REVIEW = (
 
 @control(
     "M365-APP-01",
-    "Applications that can take over the tenant",
+    "Applications that can take over the tenant or switch off its defences",
     "Applications",
     permissions=("Application.Read.All",),
     references=(maester("MT.1186"),),
@@ -129,13 +137,20 @@ def takeover_apps(t: Tenant) -> list[Finding]:
     if not affected:
         return []
     third = [a for a in affected if a.detail["publisher"] == "third party"]
+    tier0 = [a for a in affected if set(a.detail["permissions"]) & TIER0]
     return [
         Finding(
-            title="Applications hold permissions that can take over the tenant",
-            severity="high",
+            title="Applications can take over the tenant or switch off its defences",
+            severity="critical" if tier0 else "high",
             description=(
                 f"{len(affected)} application(s) hold Microsoft Graph application permissions that act without a "
-                "signed-in user and reach Global Administrator directly or in one step:\n"
+                "signed-in user and can take control of the tenant or disable its protections"
+                + (
+                    f" — {len(tier0)} of them ({', '.join(a.name for a in tier0)}) reach Global Administrator directly"
+                    if tier0
+                    else ""
+                )
+                + ":\n"
                 + _per_app(affected)
                 + "\nWhoever holds the app's credential can use these at any time, outside MFA and most "
                 "Conditional Access."
@@ -176,7 +191,7 @@ def data_apps(t: Tenant) -> list[Finding]:
     return [
         Finding(
             title="Applications can read or change content across the whole organisation",
-            severity="medium",
+            severity="high",
             description=(
                 f"{len(affected)} application(s) hold tenant-wide data permissions, not limited to particular "
                 "mailboxes, sites or users:\n"

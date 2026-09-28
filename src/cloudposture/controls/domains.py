@@ -99,7 +99,7 @@ def spf(t: Tenant) -> list[Finding]:
     return [
         Finding(
             title="Email domains have no SPF record, or one that allows anyone",
-            severity="medium",
+            severity="high" if any("allows any sender" in a.detail["problem"] for a in affected) else "medium",
             description=(
                 f"{len(affected)} verified email domain(s) have a missing, duplicated or permissive SPF record: "
                 + "; ".join(f"{a.name} — {a.detail['problem']}" for a in affected)

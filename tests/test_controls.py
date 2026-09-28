@@ -91,6 +91,8 @@ class FakeGraph:
         self._check(key)
         if key.startswith("users/"):
             return {"signInActivity": self.data["signInActivity"]}
+        if key.startswith("groups/"):
+            return {"displayName": "Excluded users"}
         return self.data[key]
 
     def list(self, path, beta=False):
@@ -99,6 +101,9 @@ class FakeGraph:
         self._check(key)
         if key.endswith("/appRoleAssignedTo"):
             return iter(self.data.get("grants", []))
+        if key.endswith("/transitiveMembers"):
+            gid = key.split("/")[1]
+            return iter({"@odata.type": "#microsoft.graph.user", "id": u} for u in self.data.get("members", {}).get(gid, []))
         return iter(self.data.get(key, []))
 
     def post_read(self, path, body):
@@ -129,7 +134,7 @@ class ConditionalAccessTests(unittest.TestCase):
         data = base_data()
         data["identity/conditionalAccess/policies"].append(policy("p-az", "Azure MFA", apps={"includeApplications": ["None"]}))
         f = finding(assess(data), "M365-CA-01")
-        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["severity"], "medium")
         self.assertEqual(f["affected"][0]["id"], "p-az")
         self.assertIn("Azure MFA", f["resource"])
         self.assertTrue(f["affected"][0]["portalUrl"].endswith("/policyId/p-az"))
@@ -163,8 +168,10 @@ class ConditionalAccessTests(unittest.TestCase):
                 p["state"] = "enabledForReportingButNotEnforced"
         doc = assess(data)
         f = finding(doc, "M365-CA-08")
-        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["severity"], "medium")
         self.assertEqual({a["id"] for a in f["affected"]}, {"p-ur", "p-sr"})
+        self.assertIn("report-only", f["resource"])
+        self.assertIn("only logged", f["title"])
         # Report-only risk policies are CA-08's, not repeated under CA-07.
         self.assertNotEqual(by_id(doc)["M365-CA-07"]["status"], "fail")
 
@@ -173,6 +180,27 @@ class ConditionalAccessTests(unittest.TestCase):
         doc = assess(data)
         self.assertEqual(by_id(doc)["M365-CA-08"]["status"], "not_applicable")
         self.assertEqual(finding(doc, "M365-LIC-01")["severity"], "info")
+
+
+class PasswordOnlyTests(unittest.TestCase):
+    def test_account_excluded_through_a_group_signs_in_with_password_alone(self):
+        data = base_data(members={"g-excl": ["u-room"]})
+        data["users"].append({"id": "u-room", "displayName": "Board room", "userPrincipalName": "room@contoso.com", "userType": "Member", "accountEnabled": True})
+        data["reports/authenticationMethods/userRegistrationDetails"].append({"id": "u-room", "isMfaRegistered": False, "methodsRegistered": []})
+        data["identity/conditionalAccess/policies"][0]["conditions"]["users"]["excludeGroups"] = ["g-excl"]
+        f = finding(assess(data), "M365-CA-06")
+        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["resource"], "Account: Board room (room@contoso.com)")
+        self.assertEqual(f["affected"][0]["detail"]["why"], ["excluded through group Excluded users"])
+        self.assertFalse(f["affected"][0]["detail"]["mfaRegistered"])
+
+    def test_admin_covered_by_a_role_policy_is_not_reported(self):
+        data = base_data(members={"g-excl": ["u-admin1"]})
+        data["identity/conditionalAccess/policies"][0]["conditions"]["users"]["excludeGroups"] = ["g-excl"]
+        data["identity/conditionalAccess/policies"].append(
+            policy("p-adm", "Admins MFA", users={"includeUsers": [], "includeRoles": [GLOBAL_ADMIN]})
+        )
+        self.assertEqual(by_id(assess(data))["M365-CA-06"]["status"], "pass")
 
 
 class PrivilegedTests(unittest.TestCase):
@@ -190,7 +218,7 @@ class PrivilegedTests(unittest.TestCase):
             {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": {"@odata.type": "#microsoft.graph.servicePrincipal", "id": "sp-1", "appId": "app-1", "displayName": "Vendor Sync"}}
         )
         f = finding(assess(data), "M365-PRV-02")
-        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["severity"], "critical")
         self.assertEqual(f["affected"][0]["detail"]["publisher"], "third party")
         # A multi-tenant app's secrets live in the publisher's tenant, so none are counted here.
         self.assertIn("publisher", f["affected"][0]["detail"]["credentials"])
@@ -238,7 +266,7 @@ class AuthAndAppsTests(unittest.TestCase):
         data = base_data(servicePrincipals=[graph_sp, vendor], grants=[{"principalId": "sp-v", "appRoleId": "r1"}, {"principalId": "sp-v", "appRoleId": "r2"}])
         doc = assess(data)
         f = finding(doc, "M365-APP-01")
-        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["severity"], "critical")
         self.assertEqual(f["affected"][0]["detail"]["permissions"], ["RoleManagement.ReadWrite.Directory"])
         self.assertIn("assign any directory role", f["description"])
         # The same app is not repeated under the data-access control.
@@ -283,12 +311,12 @@ class ContractTests(unittest.TestCase):
             for field in ("id", "title", "severity", "resource", "description", "remediation"):
                 self.assertIsInstance(f[field], str, (f["id"], field))
                 self.assertTrue(f[field].strip(), (f["id"], field))
-            self.assertIn(f["severity"], ("critical", "high", "medium", "low", "info"))
+            self.assertIn(f["severity"], ("blocker", "critical", "high", "medium", "low", "info"))
             self.assertIsInstance(f["affected"], list)
 
     def test_findings_sorted_worst_first(self):
         doc = assess(base_data(**{"identity/conditionalAccess/policies": []}))
-        order = ["critical", "high", "medium", "low", "info"]
+        order = ["blocker", "critical", "high", "medium", "low", "info"]
         ranks = [order.index(f["severity"]) for f in doc["findings"]]
         self.assertEqual(ranks, sorted(ranks))
 

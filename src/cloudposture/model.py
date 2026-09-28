@@ -131,14 +131,26 @@ def listing(names: list[str], limit: int = 5) -> str:
     return f"{', '.join(shown[:-1])} and {shown[-1]}"
 
 
-LOCATION_LIMIT = 30
+def atomic_names(affected: list[Affected]) -> list[str]:
+    """One unambiguous name per object: a name shared by several objects gets its id appended."""
+    counts: dict[str, int] = {}
+    for a in affected:
+        counts[a.name] = counts.get(a.name, 0) + 1
+    out = []
+    for a in affected:
+        if counts[a.name] > 1:
+            key = a.detail.get("appId") or a.id
+            out.append(f"{a.name} ({'appId ' if a.detail.get('appId') else 'id '}{key})")
+        else:
+            out.append(a.name)
+    return out
 
 
 def resource_line(noun: str, plural: str, affected: list[Affected]) -> str:
-    """The one-line location of a finding: the object, or how many and which."""
+    """A finding's location: the affected objects themselves, one per line, every one of them — never a
+    count or a summary, so each line can be acted on (and ingested) as its own location."""
     if not affected:
         return noun
     if len(affected) == 1:
         return f"{noun}: {affected[0].name}"
-    # The location names every object; only a very long list is cut (the rest stay in `affected`).
-    return f"{len(affected)} {plural}: {listing([a.name for a in affected], limit=LOCATION_LIMIT)}"
+    return "\n".join(atomic_names(affected))

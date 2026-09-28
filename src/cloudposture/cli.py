@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     only = {c.strip() for c in args.controls.split(",")} if args.controls else None
-    doc = run(Tenant(graph), only)
+    doc = run(Tenant(graph, scanner_app_id=args.client_id), only)
     _write(doc, args.output, args.pretty)
     s = doc["summary"]
     print(

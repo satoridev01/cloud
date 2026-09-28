@@ -574,7 +574,6 @@ def risk_policies(t: Tenant) -> list[Finding]:
             affected=[policy_affected(p, state=p.get("state"), scope=scope(p)) for p in drafts + scoped]
             or [Affected("tenantSetting", "riskPolicies", "Risk-based Conditional Access", CA_POLICIES_URL)],
             evidence={"userRiskEnforced": [p["id"] for p in user_risk], "signInRiskEnforced": [p["id"] for p in signin_risk], "draftPolicies": [policy_evidence(p) for p in drafts]},
-            resource="Conditional Access: user-risk and sign-in-risk policies",
         )
     ]
 

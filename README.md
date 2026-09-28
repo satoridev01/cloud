@@ -71,7 +71,8 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-AUT-01` | Authentication methods | Phishable authentication methods (SMS, voice, email OTP) are enabled | — | CISA SCuBA MS.AAD.3.5, CIS Microsoft 365 Foundations 5.2.3.5, Maester EIDSCA.AV01 |
 | `M365-AUT-02` | Authentication methods | Member accounts without any MFA method registered | Entra ID P1 | Maester MT.1024.mfaRegistrationV2 |
 | `M365-AUT-03` | Authentication methods | No phishing-resistant authentication method is enabled | — | CISA SCuBA MS.AAD.3.1, Maester EIDSCA.AF01 |
-| `M365-APP-01` | Applications | Applications with tenant-wide write or data-access permissions | — | Maester MT.1186 |
+| `M365-APP-01` | Applications | Applications that can take over the tenant | — | Maester MT.1186 |
+| `M365-APP-05` | Applications | Applications with access to everyone's mail, files or chats | — | — |
 | `M365-APP-02` | Applications | Users can consent to applications | — | CISA SCuBA MS.AAD.5.2 |
 | `M365-APP-03` | Applications | Users can register applications | — | CISA SCuBA MS.AAD.5.1 |
 | `M365-APP-04` | Applications | Application secrets that are long-lived or expired | — | Maester MT.1024.managedIdentity |
@@ -99,7 +100,7 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
       "category": "Conditional Access",
       "title": "Conditional Access policies are switched on but protect nothing",
       "severity": "critical|high|medium|low|info",
-      "resource": "Conditional Access policy: CA04 - Azure Management: Require MFA",
+      "resource": "Conditional Access policy: CA04 - Azure Management: Require MFA   (several objects: one per line)",
       "description": "Finished prose: what is wrong here, with names and counts, and why it matters.",
       "remediation": "Finished prose: the steps and admin-centre path to fix it.",
       "affected": [ { "type": "conditionalAccessPolicy", "id": "…", "name": "…", "portalUrl": "https://entra.microsoft.com/…", "detail": {} } ],
@@ -111,7 +112,9 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 ```
 
 `id`, `title`, `severity`, `resource`, `description` and `remediation` are always non-empty strings, so
-the `findings` array can be ingested as-is; `affected` and `evidence` carry the structured detail.
+the `findings` array can be ingested as-is. `resource` is atomic: the affected objects themselves, one
+per line (a name shared by several objects carries its id); `affected` and `evidence` carry the
+structured detail.
 
 ## Satori
 

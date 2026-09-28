@@ -13,42 +13,43 @@ from ..context import (
     parse_time,
     sp_url,
 )
-from ..model import Affected, Finding, cisa, control, listing, maester
+from ..model import Affected, Finding, atomic_names, cisa, control, maester
 
-# Application permissions that let an app take over the tenant, or read/write everyone's data.
+# What each application permission lets an app do, in words. TAKEOVER reaches Global Administrator,
+# directly or in one step; DATA reads or changes everyone's content.
 TAKEOVER = {
-    "RoleManagement.ReadWrite.Directory",
-    "AppRoleAssignment.ReadWrite.All",
-    "Application.ReadWrite.All",
-    "Directory.ReadWrite.All",
-    "Policy.ReadWrite.ConditionalAccess",
-    "Policy.ReadWrite.AuthenticationMethod",
-    "UserAuthenticationMethod.ReadWrite.All",
-    "Domain.ReadWrite.All",
-    "Organization.ReadWrite.All",
+    "RoleManagement.ReadWrite.Directory": "assign any directory role, including Global Administrator",
+    "AppRoleAssignment.ReadWrite.All": "grant itself or any app any API permission",
+    "Application.ReadWrite.All": "add credentials to any app and sign in as it",
+    "Directory.ReadWrite.All": "create, change and delete users, groups and other directory objects",
+    "Policy.ReadWrite.ConditionalAccess": "change or switch off Conditional Access policies",
+    "Policy.ReadWrite.AuthenticationMethod": "change which sign-in methods the tenant allows",
+    "UserAuthenticationMethod.ReadWrite.All": "add or reset any user's MFA methods",
+    "Domain.ReadWrite.All": "add or federate domains",
+    "Organization.ReadWrite.All": "change tenant-wide organisation settings",
 }
 DATA = {
-    "Mail.ReadWrite",
-    "Mail.Read",
-    "Mail.Send",
-    "MailboxSettings.ReadWrite",
-    "Files.ReadWrite.All",
-    "Files.Read.All",
-    "Sites.FullControl.All",
-    "Sites.ReadWrite.All",
-    "Sites.Read.All",
-    "User.ReadWrite.All",
-    "Group.ReadWrite.All",
-    "GroupMember.ReadWrite.All",
-    "Chat.Read.All",
-    "ChannelMessage.Read.All",
-    "full_access_as_app",
+    "Mail.Read": "read mail in every mailbox",
+    "Mail.ReadWrite": "read and change mail in every mailbox",
+    "Mail.Send": "send mail as any user",
+    "full_access_as_app": "full access to every mailbox (Exchange Web Services)",
+    "MailboxSettings.ReadWrite": "create inbox and forwarding rules in every mailbox",
+    "Files.Read.All": "read every OneDrive and SharePoint file",
+    "Files.ReadWrite.All": "read and change every OneDrive and SharePoint file",
+    "Sites.Read.All": "read every SharePoint site",
+    "Sites.ReadWrite.All": "read and change every SharePoint site",
+    "Sites.FullControl.All": "full control of every SharePoint site, including its sharing",
+    "Chat.Read.All": "read every Teams chat",
+    "ChannelMessage.Read.All": "read every Teams channel message",
+    "User.ReadWrite.All": "change any user's profile and account settings",
+    "Group.ReadWrite.All": "create, change and delete groups and Teams",
+    "GroupMember.ReadWrite.All": "change the membership of any group",
 }
 LONG_SECRET_DAYS = 730
 
 
 def _grants(t: Tenant) -> dict[str, list[str]]:
-    """service principal id → risky application permission values it holds (Graph + Exchange)."""
+    """service principal id → the risky application permissions it holds (Graph + Exchange)."""
     out: dict[str, list[str]] = {}
     for api in (GRAPH_APP_ID, EXCHANGE_APP_ID):
         resource = t.sp_by_app(api)
@@ -65,74 +66,121 @@ def _grants(t: Tenant) -> dict[str, list[str]]:
     return out
 
 
+def _apps(t: Tenant) -> list[tuple[dict, list[str]]]:
+    """Non-Microsoft apps holding risky permissions, minus the scanner's own registration."""
+    rows = []
+    for sp_id, perms in _grants(t).items():
+        sp = t.service_principals.get(sp_id)
+        if not sp or sp.get("appOwnerOrganizationId") == MICROSOFT_TENANT_ID:
+            continue
+        if t.scanner_app_id and sp.get("appId") == t.scanner_app_id:
+            continue
+        rows.append((sp, sorted(perms)))
+    return sorted(rows, key=lambda r: (r[0].get("displayName") or "").lower())
+
+
+def _app_affected(t: Tenant, sp: dict, perms: list[str], meanings: dict[str, str]) -> Affected:
+    owner = "this tenant" if sp.get("appOwnerOrganizationId") == t.organization.get("id") else "third party"
+    return Affected(
+        "servicePrincipal",
+        sp["id"],
+        sp.get("displayName", sp["id"]),
+        sp_url(sp["id"], sp.get("appId")),
+        {
+            "appId": sp.get("appId"),
+            "canDo": [meanings[p] for p in perms if p in meanings],
+            "permissions": [p for p in perms if p in meanings],
+            "publisher": owner,
+            **t.credentials(sp),
+        },
+    )
+
+
+def _per_app(affected: list[Affected]) -> str:
+    return "\n".join(f"- {name}: {'; '.join(a.detail['canDo'])}." for name, a in zip(atomic_names(affected), affected))
+
+
+REVIEW = (
+    "confirm the owner and the business need for each app (Enterprise applications > app > Permissions). "
+    "Revoke consent for apps that are no longer used, prefer certificates over client secrets for the "
+    "tenant's own apps, and review these grants every quarter."
+)
+
+
 @control(
     "M365-APP-01",
-    "Applications with tenant-wide write or data-access permissions",
+    "Applications that can take over the tenant",
     "Applications",
     permissions=("Application.Read.All",),
     references=(maester("MT.1186"),),
 )
-def risky_app_permissions(t: Tenant) -> list[Finding]:
-    grants = _grants(t)
-    affected = []
-    for sp_id, perms in grants.items():
-        sp = t.service_principals.get(sp_id)
-        if not sp or sp.get("appOwnerOrganizationId") == MICROSOFT_TENANT_ID:
-            continue
-        owner = "this tenant" if sp.get("appOwnerOrganizationId") == t.organization.get("id") else "third party"
-        affected.append(
-            Affected(
-                "servicePrincipal",
-                sp_id,
-                sp.get("displayName", sp_id),
-                sp_url(sp_id, sp.get("appId")),
-                {
-                    "permissions": sorted(perms),
-                    "takeover": sorted(set(perms) & TAKEOVER),
-                    "publisher": owner,
-                    **t.credentials(sp),
-                },
-            )
-        )
+def takeover_apps(t: Tenant) -> list[Finding]:
+    affected = [_app_affected(t, sp, perms, TAKEOVER) for sp, perms in _apps(t) if set(perms) & set(TAKEOVER)]
     if not affected:
         return []
-    affected.sort(key=lambda a: (not a.detail["takeover"], a.name.lower()))
-    takeover = [a for a in affected if a.detail["takeover"]]
+    third = [a for a in affected if a.detail["publisher"] == "third party"]
     return [
         Finding(
-            title="Applications can modify the directory or read everyone's data",
-            severity="high" if takeover else "medium",
+            title="Applications hold permissions that can take over the tenant",
+            severity="high",
             description=(
-                f"{len(affected)} non-Microsoft application(s) hold application permissions that act on the whole "
-                "tenant without a signed-in user: "
-                + listing(
-                    [
-                        f"{a.name} ({len(a.detail['permissions'])} permission(s)"
-                        + (f", incl. {', '.join(a.detail['takeover'][:3])}" if a.detail["takeover"] else "")
-                        + ")"
-                        for a in affected
-                    ],
-                    limit=8,
-                )
-                + ". The full list per app is in the affected objects. "
+                f"{len(affected)} application(s) hold Microsoft Graph application permissions that act without a "
+                "signed-in user and reach Global Administrator directly or in one step:\n"
+                + _per_app(affected)
+                + "\nWhoever holds the app's credential can use these at any time, outside MFA and most "
+                "Conditional Access."
                 + (
-                    f"{len(takeover)} can change roles, apps, policies or authentication methods, which is enough to "
-                    "make itself or anyone Global Administrator. "
-                    if takeover
+                    f" {len(third)} of them are published by third parties, whose credentials sit in the vendor's own "
+                    "tenant, so the organisation depends on that vendor's security for its control plane."
+                    if third
                     else ""
                 )
-                + "The app's secret or certificate is effectively a master key to that data, and consent to it is "
-                "rarely revisited."
             ),
             remediation=(
-                "For each app (Enterprise applications > app > Permissions): confirm the owner and business need, "
-                "and replace tenant-wide permissions with the narrowest one that works — e.g. Sites.Selected instead "
-                "of Sites.ReadWrite.All, or an Exchange application access policy restricting Mail.* to specific "
-                "mailboxes. Revoke consent for apps no longer used, prefer certificates over client secrets, and "
-                "review these grants quarterly."
+                "For each app, replace these permissions with the narrowest set that covers the integration — most "
+                "backup, MDR and portal tools do not need Directory.ReadWrite.All, RoleManagement.ReadWrite.Directory "
+                "or AppRoleAssignment.ReadWrite.All once set up. Ask the vendor for their least-privilege "
+                "permission list, then " + REVIEW
             ),
             affected=affected,
-            evidence={"grants": {a.id: a.detail["permissions"] for a in affected}},
+            evidence={a.detail["appId"] or a.id: a.detail["permissions"] for a in affected},
+        )
+    ]
+
+
+@control(
+    "M365-APP-05",
+    "Applications with access to everyone's mail, files or chats",
+    "Applications",
+    permissions=("Application.Read.All",),
+)
+def data_apps(t: Tenant) -> list[Finding]:
+    # Apps already reported as able to take over the tenant can grant themselves any data access.
+    affected = [
+        _app_affected(t, sp, perms, DATA)
+        for sp, perms in _apps(t)
+        if not set(perms) & set(TAKEOVER) and set(perms) & set(DATA)
+    ]
+    if not affected:
+        return []
+    return [
+        Finding(
+            title="Applications can read or change content across the whole organisation",
+            severity="medium",
+            description=(
+                f"{len(affected)} application(s) hold tenant-wide data permissions, not limited to particular "
+                "mailboxes, sites or users:\n"
+                + _per_app(affected)
+                + "\nAny of these apps' credentials is a key to that content for every user, including executives, "
+                "and a forwarding rule or a shared-link change made through it is hard to notice."
+            ),
+            remediation=(
+                "Narrow each app to what it needs: Sites.Selected instead of Sites.* or Files.*, an Exchange "
+                "application access policy (or RBAC for Applications) restricting Mail.* and MailboxSettings to "
+                "specific mailboxes, and resource-specific consent for Teams. Then " + REVIEW
+            ),
+            affected=affected,
+            evidence={a.detail["appId"] or a.id: a.detail["permissions"] for a in affected},
         )
     ]
 

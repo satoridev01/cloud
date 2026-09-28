@@ -76,9 +76,11 @@ DOMAINS_URL = "https://admin.microsoft.com/#/Domains"
 class Tenant:
     """Cached, read-only views of one tenant, fetched on first use."""
 
-    def __init__(self, graph: Graph, now: datetime | None = None):
+    def __init__(self, graph: Graph, now: datetime | None = None, scanner_app_id: str | None = None):
         self.graph = graph
         self.now = now or datetime.now(timezone.utc)
+        # The app registration running this assessment: it holds read permissions by design.
+        self.scanner_app_id = scanner_app_id
         self.permission_gaps: dict[str, str] = {}
 
     def _read(self, what: str, fn):

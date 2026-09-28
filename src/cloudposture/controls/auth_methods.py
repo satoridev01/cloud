@@ -55,7 +55,6 @@ def weak_methods(t: Tenant) -> list[Finding]:
             ),
             affected=affected,
             evidence={key: {"state": cfg.get("state"), "includeTargets": cfg.get("includeTargets")} for key, cfg in on},
-            resource="Authentication methods policy: " + listing([a.name for a in affected]),
         )
     ]
 
@@ -132,6 +131,5 @@ def phishing_resistant(t: Tenant) -> list[Finding]:
             ),
             affected=[Affected("authenticationMethod", key, name, AUTH_METHODS_URL, {"state": configs.get(key, {}).get("state", "absent")}) for key, name in PHISHING_RESISTANT.items()],
             evidence={key: configs.get(key, {}).get("state") for key in PHISHING_RESISTANT},
-            resource="Authentication methods policy: FIDO2 / passkeys, certificate-based authentication",
         )
     ]

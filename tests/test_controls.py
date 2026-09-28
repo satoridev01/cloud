@@ -236,9 +236,23 @@ class AuthAndAppsTests(unittest.TestCase):
         graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "r1", "value": "RoleManagement.ReadWrite.Directory"}, {"id": "r2", "value": "User.Read.All"}]}
         vendor = {"id": "sp-v", "appId": "app-v", "displayName": "Backup Vendor", "appOwnerOrganizationId": "99999999-0000-0000-0000-000000000000"}
         data = base_data(servicePrincipals=[graph_sp, vendor], grants=[{"principalId": "sp-v", "appRoleId": "r1"}, {"principalId": "sp-v", "appRoleId": "r2"}])
-        f = finding(assess(data), "M365-APP-01")
+        doc = assess(data)
+        f = finding(doc, "M365-APP-01")
         self.assertEqual(f["severity"], "high")
-        self.assertEqual(f["affected"][0]["detail"]["takeover"], ["RoleManagement.ReadWrite.Directory"])
+        self.assertEqual(f["affected"][0]["detail"]["permissions"], ["RoleManagement.ReadWrite.Directory"])
+        self.assertIn("assign any directory role", f["description"])
+        # The same app is not repeated under the data-access control.
+        self.assertEqual(by_id(doc)["M365-APP-05"]["status"], "pass")
+
+    def test_data_apps_are_atomic_and_exclude_the_scanner(self):
+        graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "m", "value": "MailboxSettings.ReadWrite"}]}
+        other = "99999999-0000-0000-0000-000000000000"
+        sps = [graph_sp] + [{"id": f"sp-{i}", "appId": f"app-{i}", "displayName": name, "appOwnerOrganizationId": other} for i, name in enumerate(["Mail Tool", "Mail Tool", "Scanner"])]
+        data = base_data(servicePrincipals=sps, grants=[{"principalId": f"sp-{i}", "appRoleId": "m"} for i in range(3)])
+        doc = run(Tenant(FakeGraph(data), now=NOW, scanner_app_id="app-2"))
+        f = finding(doc, "M365-APP-05")
+        self.assertEqual(f["resource"].split("\n"), ["Mail Tool (appId app-0)", "Mail Tool (appId app-1)"])
+        self.assertIn("forwarding rules", f["description"])
 
     def test_legacy_user_consent_is_high(self):
         data = base_data()
@@ -277,9 +291,7 @@ class LocationTests(unittest.TestCase):
 
         objs = [Affected("servicePrincipal", str(i), f"App {i}") for i in range(10)]
         line = resource_line("Application", "applications", objs)
-        self.assertTrue(line.startswith("10 applications: App 0, "))
-        self.assertIn("App 9", line)
-        self.assertNotIn("more", line)
+        self.assertEqual(line.split("\n"), [f"App {i}" for i in range(10)])
 
 
 class DnsParsingTests(unittest.TestCase):

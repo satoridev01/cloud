@@ -133,8 +133,7 @@ def sp_with_roles(t: Tenant) -> list[Finding]:
                     "roles": _role_names(r["roles"]),
                     "appId": sp.get("appId"),
                     "publisher": origin,
-                    "clientSecrets": len(sp.get("passwordCredentials") or []),
-                    "certificates": len(sp.get("keyCredentials") or []),
+                    **t.credentials(sp),
                 },
             )
         )

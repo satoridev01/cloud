@@ -192,7 +192,25 @@ class PrivilegedTests(unittest.TestCase):
         f = finding(assess(data), "M365-PRV-02")
         self.assertEqual(f["severity"], "high")
         self.assertEqual(f["affected"][0]["detail"]["publisher"], "third party")
-        self.assertEqual(f["affected"][0]["detail"]["clientSecrets"], 1)
+        # A multi-tenant app's secrets live in the publisher's tenant, so none are counted here.
+        self.assertIn("publisher", f["affected"][0]["detail"]["credentials"])
+
+    def test_own_app_credentials_come_from_its_registration(self):
+        data = base_data(
+            servicePrincipals=[{"id": "sp-2", "appId": "app-2", "displayName": "Internal Sync", "appOwnerOrganizationId": TENANT_ID}],
+            applications=[{"id": "o-2", "appId": "app-2", "displayName": "Internal Sync", "passwordCredentials": [{}, {}], "keyCredentials": []}],
+        )
+        data["roleManagement/directory/roleAssignments"].append(
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": {"@odata.type": "#microsoft.graph.servicePrincipal", "id": "sp-2", "appId": "app-2", "displayName": "Internal Sync"}}
+        )
+        detail = finding(assess(data), "M365-PRV-02")["affected"][0]["detail"]
+        self.assertEqual((detail["publisher"], detail["clientSecrets"]), ("this tenant", 2))
+
+    def test_single_dead_policy_reads_in_the_singular(self):
+        data = base_data()
+        data["identity/conditionalAccess/policies"].append(policy("p-az", "Azure MFA", apps={"includeApplications": ["None"]}))
+        desc = finding(assess(data), "M365-CA-01")["description"]
+        self.assertIn("'Azure MFA' is enabled but selects no target resources", desc)
 
     def test_stale_admin(self):
         data = base_data(signInActivity={"lastSuccessfulSignInDateTime": "2026-01-01T00:00:00Z"})

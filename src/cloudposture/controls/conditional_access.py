@@ -148,21 +148,34 @@ def ca_without_effect(t: Tenant) -> list[Finding]:
         for p in dead
     ]
     protective = [p for p in dead if enforces_mfa(p) or blocks(p)]
+    one = len(dead) == 1
+    states = {"enabled" if p.get("state") == "enabled" else "in report-only" for p in dead}
     names = listing([f"'{p.get('displayName')}'" for p in dead])
+    if one:
+        opening = (
+            f"The Conditional Access policy {names} is {next(iter(states))} but selects no "
+            f"{'target resources' if not has_resources(dead[0]) else 'users'}, so Entra never applies it. "
+        )
+        consequence = (
+            "It would require MFA or block access, so the control its name promises is not in force — "
+            "sign-ins it was meant to challenge go through unchallenged. "
+        )
+    else:
+        opening = (
+            f"{len(dead)} Conditional Access policies are {' or '.join(sorted(states))} but select no target "
+            f"resources or no users, so Entra never applies them: {names}. "
+        )
+        consequence = (
+            f"{len(protective)} of them would require MFA or block access, so the controls their names "
+            "promise are not in force — sign-ins they were meant to challenge go through unchallenged. "
+        )
     return [
         Finding(
             title="Conditional Access policies are switched on but protect nothing",
             severity="high" if protective else "medium",
             description=(
-                f"{len(dead)} Conditional Access polic{'y is' if len(dead) == 1 else 'ies are'} enabled "
-                f"(or in report-only) but select no target resources or no users, so Entra never applies "
-                f"{'it' if len(dead) == 1 else 'them'}: {names}. "
-                + (
-                    f"{len(protective)} of them would require MFA or block access, so the control the policy "
-                    "name promises is not in force — sign-ins it was meant to challenge go through unchallenged. "
-                    if protective
-                    else ""
-                )
+                opening
+                + (consequence if protective else "")
                 + "Policies like this are usually left behind by an edit that removed the last app or group."
             ),
             remediation=(

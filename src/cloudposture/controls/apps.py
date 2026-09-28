@@ -90,8 +90,7 @@ def risky_app_permissions(t: Tenant) -> list[Finding]:
                     "permissions": sorted(perms),
                     "takeover": sorted(set(perms) & TAKEOVER),
                     "publisher": owner,
-                    "clientSecrets": len(sp.get("passwordCredentials") or []),
-                    "certificates": len(sp.get("keyCredentials") or []),
+                    **t.credentials(sp),
                 },
             )
         )

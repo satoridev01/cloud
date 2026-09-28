@@ -223,6 +223,18 @@ class Tenant:
         select = "id,appId,displayName,passwordCredentials,keyCredentials,createdDateTime"
         return self._read("app registrations", lambda: list(self.graph.list(f"applications?$select={select}&$top=999")))
 
+    def credentials(self, sp: dict[str, Any]) -> dict[str, Any]:
+        """How an application authenticates, as far as this tenant can see. A multi-tenant app's secrets
+        live on its registration in the publisher's tenant, so only the tenant's own apps are counted."""
+        if sp.get("appOwnerOrganizationId") not in (None, self.organization.get("id")):
+            return {"credentials": "held by the publisher (not visible from this tenant)"}
+        app = next((a for a in self.applications if a.get("appId") == sp.get("appId")), None)
+        source = app or sp
+        return {
+            "clientSecrets": len(source.get("passwordCredentials") or []),
+            "certificates": len(source.get("keyCredentials") or []),
+        }
+
     @cached_property
     def domains(self) -> list[dict[str, Any]]:
         return self._read("domains", lambda: list(self.graph.list("domains")))

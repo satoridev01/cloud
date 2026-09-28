@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+# Assessments contain tenant data — never commit them.
+*.json
+!tests/fixtures/*.json
+.env

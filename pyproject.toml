@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloud-posture"
+dynamic = ["version"]
+description = "Read-only security posture assessment for Microsoft 365 / Entra ID, with findings that name the affected objects and say how to fix them."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+cloud-posture = "cloudposture.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "cloudposture.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

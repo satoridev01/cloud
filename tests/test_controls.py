@@ -330,6 +330,35 @@ class LocationTests(unittest.TestCase):
         self.assertEqual(line.split("\n"), [f"App {i}" for i in range(10)])
 
 
+class GraphRetryTests(unittest.TestCase):
+    def test_read_timeout_is_retried(self):
+        from unittest import mock
+
+        from cloudposture import graph
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"value": []}'
+
+        calls = []
+
+        def urlopen(req, timeout):
+            calls.append(1)
+            if len(calls) == 1:
+                raise TimeoutError("The read operation timed out")
+            return Response()
+
+        with mock.patch.object(graph.urllib.request, "urlopen", urlopen), mock.patch.object(graph.time, "sleep", lambda s: None):
+            self.assertEqual(graph.Graph("t").get("users"), {"value": []})
+        self.assertEqual(len(calls), 2)
+
+
 class CvssTests(unittest.TestCase):
     def test_scores_match_published_values(self):
         from cloudposture.cvss import score

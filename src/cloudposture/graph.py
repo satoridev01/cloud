@@ -3,6 +3,7 @@ retries on throttling. Standard library only, so the tool runs in any image with
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -92,11 +93,13 @@ class Graph:
                     continue
                 err = _error_body(e).get("error", {})
                 raise GraphError(e.code, err.get("code", "error"), err.get("message", str(e)), path) from None
-            except urllib.error.URLError as e:
+            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
+                # A slow Graph endpoint (sign-in activity) can time out mid-read; that is transient too.
                 if attempt < RETRIES - 1:
                     time.sleep(2 ** attempt)
                     continue
-                raise GraphError(0, "network", str(e.reason), path) from None
+                reason = getattr(e, "reason", None) or str(e) or type(e).__name__
+                raise GraphError(0, "network", str(reason), path) from None
         raise GraphError(0, "retries", "retries exhausted", path)
 
     @staticmethod

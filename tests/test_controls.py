@@ -44,7 +44,12 @@ def base_data(**over):
             policy("p-legacy", "Block legacy", grants=["block"], clientAppTypes=["exchangeActiveSync", "other"]),
             policy("p-ur", "User risk", grants=["block"], userRiskLevels=["high"]),
             policy("p-sr", "Sign-in risk", grants=["mfa"], signInRiskLevels=["high", "medium"]),
+            policy("p-dc", "Block device code", grants=["block"], authenticationFlows={"transferMethods": "deviceCodeFlow"}),
         ],
+        "identity/conditionalAccess/namedLocations": [],
+        "oauth2PermissionGrants": [],
+        "identityProtection/riskyUsers": [],
+        "deviceManagement/settings": {"secureByDefault": True},
         "policies/authorizationPolicy": {"allowInvitesFrom": "adminsAndGuestInviters", "guestUserRoleId": "10dae51f-b6af-4016-8d66-8c2a99b929b3", "defaultUserRolePermissions": {"allowedToCreateApps": False, "permissionGrantPoliciesAssigned": []}},
         "policies/authenticationMethodsPolicy": {"authenticationMethodConfigurations": [{"id": "Fido2", "state": "enabled"}, {"id": "Sms", "state": "disabled"}]},
         "users": [
@@ -89,6 +94,8 @@ class FakeGraph:
         self.calls += 1
         key = self._key(path)
         self._check(key)
+        if key == "deviceManagement/settings":
+            return self.data["deviceManagement/settings"]
         if key.startswith("users/"):
             return {"signInActivity": self.data["signInActivity"]}
         if key.startswith("groups/"):
@@ -101,6 +108,8 @@ class FakeGraph:
         self._check(key)
         if key.endswith("/appRoleAssignedTo"):
             return iter(self.data.get("grants", []))
+        if key.endswith("/owners"):
+            return iter(self.data.get("owners", {}).get(key.split("/")[1], []))
         if key.endswith("/transitiveMembers"):
             gid = key.split("/")[1]
             return iter({"@odata.type": "#microsoft.graph.user", "id": u} for u in self.data.get("members", {}).get(gid, []))
@@ -180,6 +189,89 @@ class ConditionalAccessTests(unittest.TestCase):
         doc = assess(data)
         self.assertEqual(by_id(doc)["M365-CA-08"]["status"], "not_applicable")
         self.assertEqual(finding(doc, "M365-LIC-01")["severity"], "info")
+
+
+VENDOR = "99999999-0000-0000-0000-000000000000"
+
+
+class NewControlTests(unittest.TestCase):
+    def test_device_code_not_blocked(self):
+        data = base_data()
+        data["identity/conditionalAccess/policies"] = [p for p in data["identity/conditionalAccess/policies"] if p["id"] != "p-dc"]
+        f = finding(assess(data), "M365-CA-09")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("high", 8.1))
+
+    def test_trusted_locations_are_the_location_of_the_mfa_gap(self):
+        data = base_data(**{"identity/conditionalAccess/namedLocations": [
+            {"id": "n1", "displayName": "Vendor ranges", "isTrusted": True, "ipRanges": [{"cidrAddress": "10.10.0.0/16"}, {"cidrAddress": "203.0.113.0/24"}]},
+            {"id": "n2", "displayName": "Office", "isTrusted": True, "ipRanges": [{"cidrAddress": "192.168.0.0/24"}]},
+        ]})
+        data["identity/conditionalAccess/policies"][0] = policy("p-mfa", "MFA except trusted", locations={"includeLocations": ["All"], "excludeLocations": ["AllTrusted"]})
+        f = finding(assess(data), "M365-CA-02")
+        lines = f["resource"].split("\n")
+        self.assertEqual(len(lines), 2)
+        self.assertIn("65,792 addresses", f["description"])
+        office = next(a for a in f["affected"] if a["id"] == "n2")
+        self.assertIn("private range", office["detail"]["note"])
+
+    def test_tenant_wide_delegated_consent(self):
+        app = {"id": "sp-pnp", "appId": "31359c7f-bd7e-475c-86db-fdb8c937548e", "displayName": "PnP Management Shell", "appOwnerOrganizationId": VENDOR}
+        data = base_data(servicePrincipals=[app], oauth2PermissionGrants=[
+            {"clientId": "sp-pnp", "consentType": "AllPrincipals", "scope": "Directory.ReadWrite.All Mail.ReadWrite"},
+            {"clientId": "sp-pnp", "consentType": "Principal", "scope": "RoleManagement.ReadWrite.Directory"},
+        ])
+        f = finding(assess(data), "M365-APP-06")
+        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["affected"][0]["detail"]["scopes"], ["Directory.ReadWrite.All", "Mail.ReadWrite"])
+        self.assertIn("retired", f["description"])
+
+    def test_ordinary_owner_of_a_privileged_app(self):
+        graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "rm", "value": "RoleManagement.ReadWrite.Directory"}]}
+        mine = {"id": "sp-mine", "appId": "app-mine", "displayName": "Sync Tool", "appOwnerOrganizationId": TENANT_ID}
+        data = base_data(servicePrincipals=[graph_sp, mine], grants=[{"principalId": "sp-mine", "appRoleId": "rm"}],
+                         owners={"sp-mine": [{"@odata.type": "#microsoft.graph.user", "id": "u-guest", "displayName": "Dev", "userPrincipalName": "dev@contoso.com"}]})
+        f = finding(assess(data), "M365-APP-07")
+        self.assertEqual(f["severity"], "critical")
+        self.assertEqual(f["resource"], "Account: Dev (dev@contoso.com) — owner of Sync Tool")
+
+    def test_disabled_owner_is_not_reported(self):
+        graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "rm", "value": "Mail.ReadWrite"}]}
+        mine = {"id": "sp-mine", "appId": "app-mine", "displayName": "Mailer", "appOwnerOrganizationId": TENANT_ID}
+        data = base_data(servicePrincipals=[graph_sp, mine], grants=[{"principalId": "sp-mine", "appRoleId": "rm"}],
+                         owners={"sp-mine": [{"@odata.type": "#microsoft.graph.user", "id": "u-x", "displayName": "Old", "accountEnabled": False}]})
+        self.assertEqual(by_id(assess(data))["M365-APP-07"]["status"], "pass")
+
+    def test_microsoft_corporate_tenant_apps_are_first_party(self):
+        cli = {"id": "sp-cli", "appId": "14d82eec-204b-4c2f-b7e8-296a70dab67e", "displayName": "Microsoft Graph Command Line Tools", "appOwnerOrganizationId": "72f988bf-86f1-41af-91ab-2d7cd011db47"}
+        data = base_data(servicePrincipals=[cli], oauth2PermissionGrants=[{"clientId": "sp-cli", "consentType": "AllPrincipals", "scope": "User.ReadWrite.All"}])
+        self.assertEqual(by_id(assess(data))["M365-APP-06"]["status"], "pass")
+
+    def test_admin_owner_is_not_reported(self):
+        graph_sp = {"id": "sp-graph", "appId": GRAPH_APP_ID, "displayName": "Microsoft Graph", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoles": [{"id": "rm", "value": "RoleManagement.ReadWrite.Directory"}]}
+        mine = {"id": "sp-mine", "appId": "app-mine", "displayName": "Sync Tool", "appOwnerOrganizationId": TENANT_ID}
+        data = base_data(servicePrincipals=[graph_sp, mine], grants=[{"principalId": "sp-mine", "appRoleId": "rm"}],
+                         owners={"sp-mine": [{"@odata.type": "#microsoft.graph.user", "id": "u-admin1", "displayName": "Admin One"}]})
+        self.assertEqual(by_id(assess(data))["M365-APP-07"]["status"], "pass")
+
+    def test_secret_on_a_microsoft_app(self):
+        ms = {"id": "sp-ms", "appId": "app-ms", "displayName": "Office 365 Exchange Online", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "passwordCredentials": [{}], "keyCredentials": [{"usage": "Sign"}]}
+        f = finding(assess(base_data(servicePrincipals=[ms])), "M365-APP-08")
+        self.assertEqual(f["affected"][0]["detail"], {"appId": "app-ms", "clientSecrets": 1, "certificates": 0})
+
+    def test_admin_client_without_assignment(self):
+        cli = {"id": "sp-cli", "appId": "14d82eec-204b-4c2f-b7e8-296a70dab67e", "displayName": "Microsoft Graph Command Line Tools", "appOwnerOrganizationId": MICROSOFT_TENANT_ID, "appRoleAssignmentRequired": False}
+        f = finding(assess(base_data(servicePrincipals=[cli])), "M365-APP-09")
+        self.assertEqual(f["resource"], "Application: Microsoft Graph Command Line Tools")
+
+    def test_risky_admin_is_critical(self):
+        data = base_data(**{"identityProtection/riskyUsers": [{"id": "u-admin1", "userDisplayName": "Admin One", "userPrincipalName": "a1@contoso.com", "riskLevel": "high", "riskState": "atRisk"}]})
+        f = finding(assess(data), "M365-IDP-01")
+        self.assertEqual(f["severity"], "critical")
+
+    def test_intune_not_secure_by_default(self):
+        plans = [{"servicePlanName": n, "provisioningStatus": "Success"} for n in ("AAD_PREMIUM", "AAD_PREMIUM_P2", "INTUNE_A")]
+        data = base_data(subscribedSkus=[{"capabilityStatus": "Enabled", "servicePlans": plans}], **{"deviceManagement/settings": {"secureByDefault": False}})
+        self.assertEqual(finding(assess(data), "M365-INT-01")["severity"], "medium")
 
 
 class PasswordOnlyTests(unittest.TestCase):

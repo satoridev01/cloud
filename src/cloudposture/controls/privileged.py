@@ -6,7 +6,7 @@ from typing import Any
 
 from ..context import (
     GLOBAL_ADMIN,
-    MICROSOFT_TENANT_ID,
+    MICROSOFT_TENANTS,
     PRIVILEGED_ROLES,
     Tenant,
     display,
@@ -128,7 +128,7 @@ def sp_with_roles(t: Tenant) -> list[Finding]:
     for r in sorted(rows, key=lambda r: _tier(r["roles"])):
         sp: dict[str, Any] = t.service_principals.get(r["principal"]["id"]) or r["principal"]
         owner = sp.get("appOwnerOrganizationId")
-        origin = "Microsoft" if owner == MICROSOFT_TENANT_ID else ("this tenant" if owner == t.organization.get("id") else "third party")
+        origin = "Microsoft" if owner in MICROSOFT_TENANTS else ("this tenant" if owner == t.organization.get("id") else "third party")
         affected.append(
             Affected(
                 "servicePrincipal",

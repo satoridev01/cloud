@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from ..context import (
     CONSENT_URL,
+    PRIVILEGED_ROLES,
+    display,
+    principal_kind,
+    principal_url,
     EXCHANGE_APP_ID,
     GRAPH_APP_ID,
-    MICROSOFT_TENANT_ID,
+    MICROSOFT_TENANTS,
     USER_SETTINGS_URL,
     Tenant,
     app_url,
@@ -88,7 +92,7 @@ def _apps(t: Tenant) -> list[tuple[dict, list[str]]]:
     rows = []
     for sp_id, perms in _grants(t).items():
         sp = t.service_principals.get(sp_id)
-        if not sp or sp.get("appOwnerOrganizationId") == MICROSOFT_TENANT_ID:
+        if not sp or sp.get("appOwnerOrganizationId") in MICROSOFT_TENANTS:
             continue
         if t.scanner_app_id and sp.get("appId") == t.scanner_app_id:
             continue
@@ -329,3 +333,276 @@ def app_secrets(t: Tenant) -> list[Finding]:
             evidence={"apps": [{"appId": a.id, **a.detail} for a in affected]},
         )
     ]
+
+
+# Delegated scopes that act on the whole directory with the signed-in user's rights: consented for
+# everyone, any administrator who uses the app hands it their administrative power.
+DELEGATED_TAKEOVER = {
+    "RoleManagement.ReadWrite.Directory": "manage directory roles as the signed-in user",
+    "Directory.AccessAsUser.All": "do anything the signed-in user can do in the directory",
+    "Directory.ReadWrite.All": "change the directory as the signed-in user",
+    "AppRoleAssignment.ReadWrite.All": "grant API permissions as the signed-in user",
+    "Application.ReadWrite.All": "manage apps and their credentials as the signed-in user",
+}
+DELEGATED_DATA = {
+    "Mail.Read": "read the user's mail",
+    "Mail.ReadWrite": "read and change the user's mail",
+    "Mail.Send": "send mail as the user",
+    "MailboxSettings.ReadWrite": "create inbox and forwarding rules for the user",
+    "Files.Read.All": "read every file the user can reach",
+    "Files.ReadWrite.All": "read and change every file the user can reach",
+    "Sites.ReadWrite.All": "read and change every site the user can reach",
+    "Sites.FullControl.All": "fully control every site the user can reach",
+    "User.ReadWrite.All": "change users as the signed-in user",
+    "Group.ReadWrite.All": "change groups as the signed-in user",
+    "EWS.AccessAsUser.All": "full access to the user's mailbox (EWS)",
+    "full_access_as_user": "full access to the user's mailbox",
+}
+# Community apps with a documented abuse history or retirement, named so a reader knows why.
+KNOWN_RISKY_CLIENTS = {
+    "31359c7f-bd7e-475c-86db-fdb8c937548e": "PnP Management Shell — a community multi-tenant app retired in September 2024",
+}
+
+
+@control(
+    "M365-APP-06",
+    "Applications consented for every user with broad delegated permissions",
+    "Applications",
+    permissions=("Directory.Read.All",),
+)
+def tenant_wide_consents(t: Tenant) -> list[Finding]:
+    by_client: dict[str, set[str]] = {}
+    for grant in t.delegated_grants:
+        if grant.get("consentType") != "AllPrincipals":
+            continue
+        scopes = set((grant.get("scope") or "").split()) & (set(DELEGATED_TAKEOVER) | set(DELEGATED_DATA))
+        if scopes:
+            by_client.setdefault(grant.get("clientId", ""), set()).update(scopes)
+    affected = []
+    for sp_id, scopes in by_client.items():
+        sp = t.service_principals.get(sp_id)
+        if not sp or sp.get("appOwnerOrganizationId") in MICROSOFT_TENANTS:
+            continue
+        can = [DELEGATED_TAKEOVER[s] for s in sorted(scopes) if s in DELEGATED_TAKEOVER] + [
+            DELEGATED_DATA[s] for s in sorted(scopes) if s in DELEGATED_DATA
+        ]
+        affected.append(
+            Affected(
+                "servicePrincipal",
+                sp_id,
+                sp.get("displayName", sp_id),
+                sp_url(sp_id, sp.get("appId")),
+                {
+                    "appId": sp.get("appId"),
+                    "scopes": sorted(scopes),
+                    "canDo": can,
+                    "takeover": sorted(scopes & set(DELEGATED_TAKEOVER)),
+                    **({"note": KNOWN_RISKY_CLIENTS[sp.get("appId")]} if sp.get("appId") in KNOWN_RISKY_CLIENTS else {}),
+                },
+            )
+        )
+    if not affected:
+        return []
+    affected.sort(key=lambda a: (not a.detail["takeover"], a.name.lower()))
+    takeover = [a for a in affected if a.detail["takeover"]]
+    names = atomic_names(affected)
+    return [
+        Finding(
+            title="Applications were granted access to every user's data or directory rights by one consent",
+            severity="high" if takeover else "medium",
+            cvss=cvss.PASSWORD_TO_DATA if takeover else cvss.DELEGATED_DATA,
+            description=(
+                f"{len(affected)} non-Microsoft application(s) hold delegated permissions consented on behalf of "
+                "every user in the organisation, so any user who signs in to them hands over these rights without "
+                "being asked:\n"
+                + "\n".join(
+                    f"- {n}: {'; '.join(a.detail['canDo'])}." + (f" ({a.detail['note']}.)" if a.detail.get("note") else "")
+                    for n, a in zip(names, affected)
+                )
+                + "\n"
+                + (
+                    f"{len(takeover)} of them can act on the directory with the signed-in user's own rights, so the "
+                    "moment an administrator uses one, it can do what that administrator can. "
+                    if takeover
+                    else ""
+                )
+                + "Each of these vendors can read or act on the data of whichever users sign in, and a compromised "
+                "vendor or a stolen refresh token reaches all of it."
+            ),
+            remediation=(
+                "For each app (Enterprise applications > app > Permissions > Admin consent): confirm it is still "
+                "used and approved. Revoke the tenant-wide consent for apps no longer needed, or replace it with "
+                "user-assigned access (Properties > Assignment required = Yes, then assign only the people who use "
+                "it). Remove scopes the app does not need, and send new consent requests through the admin consent "
+                "workflow so they are reviewed."
+            ),
+            affected=affected,
+            evidence={a.detail["appId"] or a.id: a.detail["scopes"] for a in affected},
+        )
+    ]
+
+
+@control(
+    "M365-APP-07",
+    "Ordinary users own applications that hold high privileges",
+    "Applications",
+    permissions=("Application.Read.All", "Directory.Read.All"),
+)
+def privileged_app_owners(t: Tenant) -> list[Finding]:
+    grants = _grants(t)
+    held_roles: dict[str, set[str]] = {}
+    for a in t.role_assignments:
+        pid = (a.get("principal") or {}).get("id") or a.get("principalId")
+        if pid:
+            held_roles.setdefault(pid, set()).add(t.role_template(a))
+    apps: dict[str, dict] = {}
+    for sp_id, perms in grants.items():
+        apps[sp_id] = {"perms": perms, "roles": held_roles.get(sp_id, set())}
+    for sp_id, roles in held_roles.items():
+        if sp_id in t.service_principals and roles & set(PRIVILEGED_ROLES):
+            apps.setdefault(sp_id, {"perms": [], "roles": roles})
+    affected, worst = [], "high"
+    for sp_id, info in apps.items():
+        sp = t.service_principals.get(sp_id)
+        if not sp or sp.get("appOwnerOrganizationId") in MICROSOFT_TENANTS:
+            continue
+        owners = list(t.owners("servicePrincipals", sp_id))
+        registration = next((a for a in t.applications if a.get("appId") == sp.get("appId")), None)
+        if registration:
+            owners += list(t.owners("applications", registration["id"]))
+        tier0 = bool(set(info["perms"]) & TIER0 or any(PRIVILEGED_ROLES.get(r, ("", 9))[1] == 0 for r in info["roles"]))
+        for owner in {o["id"]: o for o in owners}.values():
+            if owner.get("accountEnabled") is False:
+                continue  # A disabled account cannot sign in to add a credential.
+            owner_roles = held_roles.get(owner["id"], set())
+            if any(PRIVILEGED_ROLES.get(r, ("", 9))[1] == 0 for r in owner_roles):
+                continue  # A tenant administrator can already do what the app can.
+            if tier0:
+                worst = "critical"
+            what = [TAKEOVER.get(p) or DATA.get(p) for p in info["perms"]] + [PRIVILEGED_ROLES[r][0] for r in info["roles"] if r in PRIVILEGED_ROLES]
+            affected.append(
+                Affected(
+                    principal_kind(owner),
+                    owner["id"],
+                    f"{display(owner)} — owner of {sp.get('displayName')}",
+                    principal_url(owner),
+                    {"app": sp.get("displayName"), "appId": sp.get("appId"), "appCan": [w for w in what if w], "ownerRoles": sorted(PRIVILEGED_ROLES[r][0] for r in owner_roles if r in PRIVILEGED_ROLES)},
+                )
+            )
+    if not affected:
+        return []
+    return [
+        Finding(
+            title="Ordinary accounts own applications that can act on the whole tenant",
+            severity=worst,
+            cvss=cvss.OWNER_TAKEOVER if worst == "critical" else cvss.OWNER_TO_DATA,
+            description=(
+                "An application's owner can add a new client secret to it and then sign in as the application, "
+                "inheriting everything the app is allowed to do. These owners are not tenant administrators, yet "
+                "own apps with far more power than they have:\n"
+                + "\n".join(f"- {a.name}: the app can {'; '.join(a.detail['appCan']) or 'act with its permissions'}." for a in affected)
+                + "\nCompromising one of these accounts — or the person misusing it — is therefore a path to the "
+                "app's full access, outside MFA and most Conditional Access."
+            ),
+            remediation=(
+                "Remove these owners (App registrations > app > Owners, and Enterprise applications > app > Owners) "
+                "and give ownership to a small group of administrators instead. Restrict who can add credentials to "
+                "apps with an app management policy, and alert on 'Add service principal credentials' and 'Update "
+                "application – Certificates and secrets management' in the audit log."
+            ),
+            affected=affected,
+            evidence={a.id: a.detail for a in affected},
+        )
+    ]
+
+
+@control(
+    "M365-APP-08",
+    "Credentials added to Microsoft's own applications",
+    "Applications",
+    permissions=("Application.Read.All",),
+)
+def microsoft_app_backdoors(t: Tenant) -> list[Finding]:
+    affected = []
+    for sp in t.service_principals.values():
+        if sp.get("appOwnerOrganizationId") not in MICROSOFT_TENANTS:
+            continue
+        secrets = sp.get("passwordCredentials") or []
+        certs = [k for k in sp.get("keyCredentials") or [] if k.get("usage") == "Verify"]
+        if secrets or certs:
+            affected.append(
+                Affected("servicePrincipal", sp["id"], sp.get("displayName", sp["id"]), sp_url(sp["id"], sp.get("appId")), {"appId": sp.get("appId"), "clientSecrets": len(secrets), "certificates": len(certs)})
+            )
+    if not affected:
+        return []
+    return [
+        Finding(
+            title="Secrets or certificates were added to Microsoft first-party applications in this tenant",
+            severity="high",
+            cvss=cvss.PASSWORD_TO_DATA,
+            description=(
+                f"{len(affected)} service principal(s) of applications published by Microsoft carry credentials added "
+                "in this tenant: " + "; ".join(atomic_names(affected)) + ". Microsoft's own apps do not need "
+                "tenant-added secrets; adding one is a known persistence technique, because the app keeps its "
+                "Microsoft-granted permissions and looks legitimate in every list."
+            ),
+            remediation=(
+                "Treat this as a possible compromise: find who added each credential (Audit logs > 'Add service "
+                "principal credentials'), remove credentials nobody can account for, and review the sign-ins of these "
+                "service principals for the period since."
+            ),
+            affected=affected,
+            evidence={a.id: a.detail for a in affected},
+        )
+    ]
+
+
+# Microsoft client apps an attacker uses for token theft and directory recon once they hold a password.
+PRIVILEGED_CLIENTS = {
+    "1950a258-227b-4e31-a9cf-717495945fc2": "Microsoft Azure PowerShell",
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46": "Microsoft Azure CLI",
+    "14d82eec-204b-4c2f-b7e8-296a70dab67e": "Microsoft Graph Command Line Tools",
+    "de8bc8b5-d9f9-48b1-a8ad-b748da725064": "Graph Explorer",
+    "1b730954-1685-4b74-9bfd-dac224a7b894": "Azure Active Directory PowerShell",
+    "d1ddf0e4-d672-4dae-b554-9d5bdfd93547": "Microsoft Intune PowerShell",
+    "fb78d390-0c51-40cd-8e17-fdbfab77341b": "Microsoft Exchange REST API Based PowerShell",
+    "9bc3ab49-b65d-410a-85ad-de819febfddc": "Microsoft SharePoint Online Management Shell",
+}
+
+
+@control(
+    "M365-APP-09",
+    "Admin tools that any user can sign in to",
+    "Applications",
+    permissions=("Application.Read.All",),
+    references=(maester("MT.1186"),),
+)
+def open_admin_clients(t: Tenant) -> list[Finding]:
+    affected = [
+        Affected("servicePrincipal", sp["id"], PRIVILEGED_CLIENTS[sp["appId"]], sp_url(sp["id"], sp["appId"]), {"appId": sp["appId"]})
+        for sp in t.service_principals.values()
+        if sp.get("appId") in PRIVILEGED_CLIENTS and not sp.get("appRoleAssignmentRequired")
+    ]
+    if not affected:
+        return []
+    return [
+        Finding(
+            title="Microsoft admin tools can be used by any user, not only administrators",
+            severity="medium",
+            cvss=cvss.DIRECTORY_EXPOSURE,
+            description=(
+                "These Microsoft command-line and admin clients do not require an assignment, so any account — "
+                "including one taken over by phishing — can sign in to them and query or script against the tenant "
+                "with that account's rights: " + "; ".join(a.name for a in affected) + ". Attackers use them right "
+                "after a compromise to map users, groups, roles and apps and to mint long-lived tokens."
+            ),
+            remediation=(
+                "For each app (Enterprise applications > app > Properties), set 'Assignment required' to Yes and "
+                "assign the administrators and automation accounts that need it. Create the service principal first "
+                "for tools that do not appear in the list yet, so the setting can be applied before anyone uses them."
+            ),
+            affected=affected,
+            evidence={a.id: a.detail for a in affected},
+        )
+    ]
+

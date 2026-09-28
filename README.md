@@ -39,8 +39,11 @@ permissions (admin consent), all read-only:
 
 - `Application.Read.All`
 - `AuditLog.Read.All`
+- `DeviceManagementConfiguration.Read.All`
 - `Directory.Read.All`
 - `Domain.Read.All`
+- `GroupMember.Read.All`
+- `IdentityRiskyUser.Read.All`
 - `Organization.Read.All`
 - `Policy.Read.All`
 - `RoleAssignmentSchedule.Read.Directory`
@@ -62,6 +65,7 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-CA-06` | Conditional Access | Accounts that sign in with a password alone | — | Maester MT.1005, Maester MT.1036 |
 | `M365-CA-07` | Conditional Access | Protective Conditional Access policies left in report-only or disabled | — | Maester MT.1184 |
 | `M365-CA-08` | Conditional Access | Risky users and risky sign-ins are not challenged or blocked | Entra ID P2 | CISA SCuBA MS.AAD.2.1, CISA SCuBA MS.AAD.2.3, Maester MT.1012, Maester MT.1024.userRiskPolicy |
+| `M365-CA-09` | Conditional Access | The device code sign-in flow is not blocked | — | Maester MT.1052 |
 | `M365-PRV-01` | Privileged access | Global Administrator count outside 2–8 | — | CISA SCuBA MS.AAD.7.1, CIS Microsoft 365 Foundations 1.1.3, Maester MT.1024.oneAdmin |
 | `M365-PRV-02` | Privileged access | Applications (service principals) hold privileged directory roles | — | CISA SCuBA MS.AAD.7.4, Maester MT.1027 |
 | `M365-PRV-03` | Privileged access | Privileged roles held by accounts synced from on-premises | — | CISA SCuBA MS.AAD.7.3 |
@@ -76,6 +80,12 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-APP-02` | Applications | Users can consent to applications | — | CISA SCuBA MS.AAD.5.2 |
 | `M365-APP-03` | Applications | Users can register applications | — | CISA SCuBA MS.AAD.5.1 |
 | `M365-APP-04` | Applications | Application secrets that are long-lived or expired | — | Maester MT.1024.managedIdentity |
+| `M365-APP-06` | Applications | Applications consented for every user with broad delegated permissions | — | — |
+| `M365-APP-07` | Applications | Ordinary users own applications that hold high privileges | — | — |
+| `M365-APP-08` | Applications | Credentials added to Microsoft's own applications | — | — |
+| `M365-APP-09` | Applications | Admin tools that any user can sign in to | — | Maester MT.1186 |
+| `M365-IDP-01` | Identity Protection | Accounts Microsoft rates as compromised right now | Entra ID P2 | — |
+| `M365-INT-01` | Devices | Devices without a compliance policy count as compliant | — | Maester MT.1054, CIS Microsoft 365 Foundations 4.1 |
 | `M365-TEN-01` | Tenant settings | Anyone, including guests, can invite external users | — | CISA SCuBA MS.AAD.8.2 |
 | `M365-TEN-02` | Tenant settings | Guests have the same directory access as members | — | CISA SCuBA MS.AAD.8.1 |
 | `M365-LIC-01` | Licensing | Identity protection and PIM are not licensed | — | — |
@@ -108,7 +118,7 @@ below 4.0 low.
   "tool": { "name": "cloud-posture", "version": "0.1.0" },
   "tenant": { "id": "…", "displayName": "…", "defaultDomain": "…" },
   "licences": { "entraIdP1": true, "entraIdP2": false, "intune": true, "defenderForOffice365": false },
-  "summary": { "controls": 26, "failed": 9, "passed": 14, "notApplicable": 2, "notEvaluated": 1, "findings": 9 },
+  "summary": { "controls": 34, "failed": 9, "passed": 14, "notApplicable": 2, "notEvaluated": 1, "findings": 9 },
   "controls": [ { "id": "M365-CA-01", "status": "fail|pass|not_applicable|not_evaluated|error", "reason": "…" } ],
   "permissionGaps": { "…": "…" },
   "findings": [

@@ -28,6 +28,7 @@ NOUNS = {
     "authenticationMethod": ("Authentication method", "authentication methods"),
     "tenantSetting": ("Tenant setting", "tenant settings"),
     "tenant": ("Tenant", "tenants"),
+    "namedLocation": ("Named location", "named locations"),
 }
 
 

@@ -16,6 +16,16 @@ GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
 EXCHANGE_APP_ID = "00000002-0000-0ff1-ce00-000000000000"
 AZURE_MANAGEMENT_APP_ID = "797f4846-ba00-4fd7-ba43-dac1f8f63013"
 MICROSOFT_TENANT_ID = "f8cdef31-a31e-4b4a-93e4-5f571e91255a"
+# Microsoft publishes first-party apps from several tenants of its own (services, corporate, and the
+# ones behind apps such as Microsoft Graph Command Line Tools).
+MICROSOFT_TENANTS = frozenset(
+    {
+        MICROSOFT_TENANT_ID,
+        "72f988bf-86f1-41af-91ab-2d7cd011db47",
+        "cdc5aeea-15c5-4db6-b079-fcadd2505dc2",
+        "33e01921-4d64-4f8c-a055-5bdaffd5e33d",
+    }
+)
 
 GLOBAL_ADMIN = "62e90394-69f5-4237-9190-012177145e10"
 
@@ -203,7 +213,7 @@ class Tenant:
 
     @cached_property
     def service_principals(self) -> dict[str, dict[str, Any]]:
-        select = "id,appId,displayName,appOwnerOrganizationId,servicePrincipalType,accountEnabled,passwordCredentials,keyCredentials,appRoles"
+        select = "id,appId,displayName,appOwnerOrganizationId,servicePrincipalType,accountEnabled,appRoleAssignmentRequired,passwordCredentials,keyCredentials,appRoles"
         rows = self._read("service principals", lambda: list(self.graph.list(f"servicePrincipals?$select={select}&$top=999")))
         return {s["id"]: s for s in rows}
 
@@ -236,6 +246,21 @@ class Tenant:
             "clientSecrets": len(source.get("passwordCredentials") or []),
             "certificates": len(source.get("keyCredentials") or []),
         }
+
+    @cached_property
+    def named_locations(self) -> dict[str, dict[str, Any]]:
+        rows = self._read("named locations", lambda: list(self.graph.list("identity/conditionalAccess/namedLocations")))
+        return {r["id"]: r for r in rows}
+
+    @cached_property
+    def delegated_grants(self) -> list[dict[str, Any]]:
+        """Delegated permission grants (oauth2PermissionGrants), per user or for all principals."""
+        return self._read("delegated permission grants", lambda: list(self.graph.list("oauth2PermissionGrants?$top=999")))
+
+    def owners(self, kind: str, object_id: str) -> list[dict[str, Any]]:
+        """Owners of an application or service principal (kind = "applications" | "servicePrincipals")."""
+        select = "id,displayName,userPrincipalName,accountEnabled"
+        return self._read("application owners", lambda: list(self.graph.list(f"{kind}/{object_id}/owners?$select={select}")))
 
     def group_members(self, group_id: str) -> set[str]:
         """Every user in a group, nested groups included (cached per group)."""

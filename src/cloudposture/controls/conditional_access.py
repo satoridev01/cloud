@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 
 from ..context import (
@@ -194,6 +195,50 @@ def ca_without_effect(t: Tenant) -> list[Finding]:
     ]
 
 
+PRIVATE_NETS = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")]
+LARGE_RANGE = 4096
+
+
+def _exempt_locations(t: Tenant, policies: list[dict[str, Any]]) -> list[Affected]:
+    """The named locations these policies exempt from MFA, each described by what it actually covers."""
+    ids: list[str] = []
+    for p in policies:
+        for lid in _cond(p, "locations", "excludeLocations") or []:
+            if lid == "AllTrusted":
+                ids += [i for i, loc in t.named_locations.items() if loc.get("isTrusted")]
+            elif lid not in ids:
+                ids.append(lid)
+    out = []
+    for lid in dict.fromkeys(ids):
+        loc = t.named_locations.get(lid)
+        if not loc:
+            continue
+        ranges = [r.get("cidrAddress") for r in loc.get("ipRanges") or [] if r.get("cidrAddress")]
+        nets = [ipaddress.ip_network(r, strict=False) for r in ranges]
+        size = sum(n.num_addresses for n in nets)
+        private = [str(n) for n in nets if any(n.subnet_of(pn) for pn in PRIVATE_NETS if n.version == pn.version)]
+        countries = loc.get("countriesAndRegions") or []
+        if countries:
+            note = f"countries {', '.join(countries)} — every sign-in from them skips MFA"
+        elif ranges and len(private) == len(ranges):
+            note = f"{', '.join(private)} — a private range Entra never sees, so it exempts nothing (and protects nothing)"
+        else:
+            note = f"{len(ranges)} IP range(s), {size:,} addresses" + (
+                " — large enough to include networks the organisation does not control" if size > LARGE_RANGE else ""
+            )
+        name = loc.get("displayName", lid)
+        out.append(
+            Affected(
+                "namedLocation",
+                lid,
+                f"{name} ({note.split(' — ')[0]})",
+                f"{CA_POLICIES_URL.rsplit('/', 1)[0]}/NamedLocations",
+                {"location": name, "note": note, "ranges": ranges, "addresses": size, "private": private, "countries": countries, "trusted": loc.get("isTrusted")},
+            )
+        )
+    return out
+
+
 @control(
     "M365-CA-02",
     "MFA is not required for all users",
@@ -206,6 +251,7 @@ def mfa_all_users(t: Tenant) -> list[Finding]:
         return []
     located = baseline_mfa(t, allow_trusted_locations=True)
     if located:
+        places = _exempt_locations(t, located)
         return [
             Finding(
                 title="MFA is skipped for sign-ins from trusted locations",
@@ -217,9 +263,14 @@ def mfa_all_users(t: Tenant) -> list[Finding]:
                     + listing([f"'{p.get('displayName')}'" for p in located])
                     + (" excludes" if len(located) == 1 else " exclude")
                     + " named or trusted locations, so anyone signing in from those networks needs only a "
-                    "password. An attacker who reaches the office network or VPN — or a compromised device already "
-                    "on it — faces no second factor, and a trusted IP range that is broader than intended exempts "
-                    "far more than the office."
+                    "password. An attacker who reaches one of them — the office network or VPN, a compromised "
+                    "device already on it, or a shared service whose addresses are listed — faces no second factor."
+                    + (
+                        "\nThe exempt networks are:\n"
+                        + "\n".join(f"- {a.detail['location']}: {a.detail['note']}" for a in places)
+                        if places
+                        else ""
+                    )
                 ),
                 remediation=(
                     "Remove the location exclusion from the policy so MFA is required everywhere; if prompts from "
@@ -228,7 +279,7 @@ def mfa_all_users(t: Tenant) -> list[Finding]:
                     "locations marked as trusted (Conditional Access > Named locations) and narrow them to the "
                     "egress IPs you actually own."
                 ),
-                affected=[policy_affected(p, excludedLocations=_cond(p, "locations", "excludeLocations")) for p in located],
+                affected=places or [policy_affected(p, excludedLocations=_cond(p, "locations", "excludeLocations")) for p in located],
                 evidence={"policies": [policy_evidence(p) | {"locations": _cond(p, "locations")} for p in located]},
             )
         ]
@@ -677,5 +728,45 @@ def risk_policies(t: Tenant) -> list[Finding]:
             },
         )
     ]
+
+@control(
+    "M365-CA-09",
+    "The device code sign-in flow is not blocked",
+    "Conditional Access",
+    permissions=PERMS,
+    references=(maester("MT.1052"),),
+)
+def device_code(t: Tenant) -> list[Finding]:
+    for p in t.ca_policies:
+        flows = (_cond(p, "authenticationFlows") or {}).get("transferMethods") or ""
+        if enabled(p) and blocks(p) and all_users(p) and all_apps(p) and "deviceCodeFlow" in flows:
+            return []
+    return [
+        Finding(
+            title="Device code sign-in is allowed, so users can be phished into approving an attacker's session",
+            severity="high",
+            cvss=cvss.TOKEN_PHISHING,
+            description=(
+                "No enabled Conditional Access policy blocks the device code authentication flow for all users. "
+                "The flow lets a device without a browser sign in by having a person enter a short code at "
+                "microsoft.com/devicelogin — and an attacker can send that code in a phishing message. The victim "
+                "signs in and completes MFA on Microsoft's real page, and the attacker's session receives the "
+                "tokens: MFA is satisfied, nothing looks wrong to the user, and the attacker keeps access to mail, "
+                "files and Teams through the refresh token. Campaigns using exactly this technique (tracked by "
+                "Microsoft as Storm-2372) have targeted organisations throughout 2025."
+            ),
+            remediation=(
+                "Create a Conditional Access policy: Users = All users (exclude emergency-access accounts and, if "
+                "needed, a small group for meeting-room or kiosk devices that really use device code); Target "
+                "resources = All resources; Conditions > Authentication flows = Device code flow; Grant = Block "
+                "access. Check the sign-in logs (filter Authentication protocol = Device code) in report-only "
+                "first to find legitimate users."
+            ),
+            affected=[Affected("tenantSetting", "deviceCodeFlow", "Authentication flows: device code", CA_POLICIES_URL)],
+            evidence={"policiesBlockingDeviceCode": []},
+            resource="Authentication flows: device code (not blocked)",
+        )
+    ]
+
 
 __all__ = ["baseline_mfa", "enforces_mfa", "blocks", "has_resources", "SECURITY_DEFAULTS_URL"]

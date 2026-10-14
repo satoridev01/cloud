@@ -64,6 +64,7 @@ def base_data(**over):
         "identityProtection/riskyUsers": [],
         "deviceManagement/settings": {"secureByDefault": True},
         "policies/authorizationPolicy": {"allowInvitesFrom": "adminsAndGuestInviters", "guestUserRoleId": "10dae51f-b6af-4016-8d66-8c2a99b929b3", "defaultUserRolePermissions": {"allowedToCreateApps": False, "permissionGrantPoliciesAssigned": []}},
+        "policies/adminConsentRequestPolicy": {"isEnabled": True, "notifyReviewers": True, "reviewers": [{"query": "/users/u-admin1", "queryType": "MicrosoftGraph"}]},
         "policies/authenticationMethodsPolicy": {"authenticationMethodConfigurations": [{"id": "Fido2", "state": "enabled"}, {"id": "Sms", "state": "disabled"}]},
         "users": [
             {"id": "u-admin1", "displayName": "Admin One", "userPrincipalName": "a1@contoso.com", "userType": "Member", "accountEnabled": True},
@@ -626,6 +627,63 @@ class AuthAndAppsTests(unittest.TestCase):
         data = base_data()
         data["policies/authorizationPolicy"]["defaultUserRolePermissions"]["permissionGrantPoliciesAssigned"] = ["ManagePermissionGrantsForSelf.microsoft-user-default-legacy"]
         self.assertEqual(finding(assess(data), "M365-APP-02")["severity"], "high")
+
+
+class ConsentTests(unittest.TestCase):
+    def grants(self, *rows):
+        app = {"id": "sp-mail", "appId": "app-mail", "displayName": "Mail Helper", "appOwnerOrganizationId": VENDOR}
+        data = base_data(servicePrincipals=[app], oauth2PermissionGrants=list(rows))
+        data["users"].append({"id": "u-amy", "displayName": "Amy", "userPrincipalName": "amy@contoso.com", "userType": "Member", "accountEnabled": True})
+        return data
+
+    def test_per_user_consent_to_mail(self):
+        data = self.grants({"clientId": "sp-mail", "consentType": "Principal", "principalId": "u-amy", "scope": "openid offline_access Mail.ReadWrite"})
+        f = finding(assess(data), "M365-APP-10")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("medium", 5.9))
+        self.assertEqual(f["affected"][0]["detail"]["scopes"], ["Mail.ReadWrite"])
+        self.assertIn("consented by Amy (amy@contoso.com)", f["description"])
+
+    def test_admin_consenting_to_directory_rights_is_high(self):
+        data = self.grants(
+            {"clientId": "sp-mail", "consentType": "Principal", "principalId": "u-admin1", "scope": "Directory.AccessAsUser.All"},
+            {"clientId": "sp-mail", "consentType": "Principal", "principalId": "u-amy", "scope": "Directory.AccessAsUser.All"},
+        )
+        f = finding(assess(data), "M365-APP-10")
+        self.assertEqual(f["severity"], "high")
+        self.assertEqual(f["affected"][0]["detail"]["administrators"], ["Admin One (a1@contoso.com)"])
+
+    def test_narrow_or_tenant_wide_scopes_pass(self):
+        data = self.grants(
+            {"clientId": "sp-mail", "consentType": "Principal", "principalId": "u-amy", "scope": "User.Read openid Mail.Read"},
+            {"clientId": "sp-mail", "consentType": "AllPrincipals", "scope": "Mail.Read"},
+        )
+        self.assertEqual(by_id(assess(data))["M365-APP-10"]["status"], "pass")
+
+    def test_microsoft_apps_are_not_reported(self):
+        data = self.grants({"clientId": "sp-mail", "consentType": "Principal", "principalId": "u-amy", "scope": "Mail.ReadWrite"})
+        data["servicePrincipals"][0]["appOwnerOrganizationId"] = MICROSOFT_TENANT_ID
+        self.assertEqual(by_id(assess(data))["M365-APP-10"]["status"], "pass")
+
+    def test_unreadable_grants_are_not_evaluated(self):
+        doc = assess(base_data(), forbidden={"oauth2PermissionGrants"})
+        self.assertEqual(by_id(doc)["M365-APP-10"]["status"], "not_evaluated")
+        self.assertIn("Directory.Read.All", by_id(doc)["M365-APP-10"]["permissions"])
+
+    def test_admin_consent_workflow_off(self):
+        data = base_data(**{"policies/adminConsentRequestPolicy": {"isEnabled": False, "reviewers": []}})
+        f = finding(assess(data), "M365-APP-11")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("low", 3.1))
+        self.assertEqual(f["resource"], "Tenant setting: admin consent workflow")
+        self.assertEqual(f["references"][0]["id"], "MS.AAD.5.3")
+
+    def test_admin_consent_workflow_without_reviewers(self):
+        data = base_data(**{"policies/adminConsentRequestPolicy": {"isEnabled": True, "reviewers": []}})
+        self.assertIn("no reviewers", finding(assess(data), "M365-APP-11")["title"])
+
+    def test_admin_consent_workflow_unreadable(self):
+        doc = assess(base_data(), forbidden={"policies/adminConsentRequestPolicy"})
+        self.assertEqual(by_id(doc)["M365-APP-11"]["status"], "not_evaluated")
+        self.assertIn("the admin consent request policy", doc["permissionGaps"])
 
 
 class ContractTests(unittest.TestCase):

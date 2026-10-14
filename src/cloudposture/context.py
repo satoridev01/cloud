@@ -78,6 +78,7 @@ AUTH_METHODS_URL = f"{ENTRA}/#view/Microsoft_AAD_IAM/AuthenticationMethodsMenuBl
 CA_POLICIES_URL = f"{ENTRA}/#view/Microsoft_AAD_ConditionalAccess/ConditionalAccessBlade/~/Policies"
 USER_SETTINGS_URL = f"{ENTRA}/#view/Microsoft_AAD_UsersAndTenants/UserManagementMenuBlade/~/UserSettings"
 CONSENT_URL = f"{ENTRA}/#view/Microsoft_AAD_IAM/ConsentPoliciesMenuBlade/~/UserSettings"
+ADMIN_CONSENT_URL = f"{ENTRA}/#view/Microsoft_AAD_IAM/ConsentPoliciesMenuBlade/~/AdminConsentSettings"
 EXTERNAL_COLLAB_URL = f"{ENTRA}/#view/Microsoft_AAD_IAM/CompanyRelationshipsMenuBlade/~/Settings"
 SECURITY_DEFAULTS_URL = f"{ENTRA}/#view/Microsoft_AAD_IAM/TenantOverview.ReactView"
 DOMAINS_URL = "https://admin.microsoft.com/#/Domains"
@@ -153,6 +154,10 @@ class Tenant:
     @cached_property
     def authorization_policy(self) -> dict[str, Any]:
         return self._read("the authorization policy", lambda: self.graph.get("policies/authorizationPolicy"))
+
+    @cached_property
+    def admin_consent_request_policy(self) -> dict[str, Any]:
+        return self._read("the admin consent request policy", lambda: self.graph.get("policies/adminConsentRequestPolicy"))
 
     @cached_property
     def auth_methods_policy(self) -> dict[str, Any]:

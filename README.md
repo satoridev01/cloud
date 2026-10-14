@@ -89,6 +89,8 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-APP-07` | Applications | Ordinary users own applications that hold high privileges | — | — |
 | `M365-APP-08` | Applications | Credentials added to Microsoft's own applications | — | — |
 | `M365-APP-09` | Applications | Admin tools that any user can sign in to | — | Maester MT.1186 |
+| `M365-APP-10` | Applications | Applications individual users consented to with broad delegated permissions | — | — |
+| `M365-APP-11` | Applications | The admin consent workflow is not enabled | — | CISA SCuBA MS.AAD.5.3, Maester EIDSCA.CR01 |
 | `M365-IDP-01` | Identity Protection | Accounts Microsoft rates as compromised right now | Entra ID P2 | — |
 | `M365-INT-01` | Devices | Devices without a compliance policy count as compliant | — | Maester MT.1054, CIS Microsoft 365 Foundations 4.1 |
 | `M365-TEN-01` | Tenant settings | Anyone, including guests, can invite external users | — | CISA SCuBA MS.AAD.8.2 |

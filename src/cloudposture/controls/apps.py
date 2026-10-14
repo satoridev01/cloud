@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..context import (
+    ADMIN_CONSENT_URL,
     CONSENT_URL,
     PRIVILEGED_ROLES,
     display,
@@ -606,3 +607,146 @@ def open_admin_clients(t: Tenant) -> list[Finding]:
         )
     ]
 
+
+@control(
+    "M365-APP-10",
+    "Applications individual users consented to with broad delegated permissions",
+    "Applications",
+    permissions=("Directory.Read.All", "User.Read.All", "RoleManagement.Read.Directory", "GroupMember.Read.All"),
+)
+def per_user_consents(t: Tenant) -> list[Finding]:
+    broad = set(DELEGATED_TAKEOVER) | set(DELEGATED_DATA)
+    tenant_wide: dict[str, set[str]] = {}
+    for grant in t.delegated_grants:
+        if grant.get("consentType") == "AllPrincipals":
+            tenant_wide.setdefault(grant.get("clientId", ""), set()).update((grant.get("scope") or "").split())
+    by_client: dict[str, dict[str, set[str]]] = {}
+    for grant in t.delegated_grants:
+        if grant.get("consentType") != "Principal" or not grant.get("principalId"):
+            continue
+        # Scopes the app already holds for everyone are M365-APP-06's finding.
+        scopes = set((grant.get("scope") or "").split()) & broad - tenant_wide.get(grant.get("clientId", ""), set())
+        if scopes:
+            row = by_client.setdefault(grant.get("clientId", ""), {"scopes": set(), "users": set()})
+            row["scopes"] |= scopes
+            row["users"].add(grant["principalId"])
+    admins = set(t.privileged_holders)
+    affected = []
+    for sp_id, row in by_client.items():
+        sp = t.service_principals.get(sp_id)
+        if not sp or sp.get("appOwnerOrganizationId") in MICROSOFT_TENANTS:
+            continue
+        if t.scanner_app_id and sp.get("appId") == t.scanner_app_id:
+            continue
+        users = sorted(row["users"], key=lambda u: display(t.users.get(u, {"id": u})).lower())
+        scopes = sorted(row["scopes"])
+        affected.append(
+            Affected(
+                "servicePrincipal",
+                sp_id,
+                sp.get("displayName", sp_id),
+                sp_url(sp_id, sp.get("appId")),
+                {
+                    "appId": sp.get("appId"),
+                    "scopes": scopes,
+                    "canDo": [DELEGATED_TAKEOVER[s] for s in scopes if s in DELEGATED_TAKEOVER] + [DELEGATED_DATA[s] for s in scopes if s in DELEGATED_DATA],
+                    "takeover": [s for s in scopes if s in DELEGATED_TAKEOVER],
+                    "consentedBy": [display(t.users.get(u, {"id": u})) for u in users],
+                    "administrators": [display(t.users.get(u, {"id": u})) for u in users if u in admins],
+                    **({"note": KNOWN_RISKY_CLIENTS[sp.get("appId")]} if sp.get("appId") in KNOWN_RISKY_CLIENTS else {}),
+                },
+            )
+        )
+    if not affected:
+        return []
+    affected.sort(key=lambda a: (not (a.detail["takeover"] and a.detail["administrators"]), a.name.lower()))
+    worst = [a for a in affected if a.detail["takeover"] and a.detail["administrators"]]
+    names = atomic_names(affected)
+    return [
+        Finding(
+            title="Users have individually granted applications access to their mail, files or directory rights",
+            severity="high" if worst else "medium",
+            cvss=cvss.PASSWORD_TO_DATA if worst else cvss.DELEGATED_DATA,
+            description=(
+                f"{len(affected)} non-Microsoft application(s) hold broad delegated permissions that individual users "
+                "consented to for themselves:\n"
+                + "\n".join(
+                    f"- {n}: {'; '.join(a.detail['canDo'])} — consented by {listing(a.detail['consentedBy'])}"
+                    + (f", including administrator(s) {listing(a.detail['administrators'])}" if a.detail["administrators"] else "")
+                    + "."
+                    + (f" ({a.detail['note']}.)" if a.detail.get("note") else "")
+                    for n, a in zip(names, affected)
+                )
+                + "\nThis is what an illicit-consent phishing attack leaves behind: the app keeps a refresh token that "
+                "survives password resets and MFA, and reads or acts on each consenting user's data until the grant "
+                "is revoked."
+                + (
+                    f" {len(worst)} of them can act on the directory with an administrator's own rights."
+                    if worst
+                    else ""
+                )
+            ),
+            remediation=(
+                "For each app, confirm with the users that they knowingly installed it and that it is approved. Revoke "
+                "the grants of apps nobody recognises (Enterprise applications > app > Permissions > User consent, or "
+                "Remove-MgOauth2PermissionGrant), check the audit log ('Consent to application') and the users' "
+                "mailbox rules for misuse, and disable the service principal of anything malicious. Then stop new "
+                "grants: restrict user consent (M365-APP-02) and route requests through the admin consent workflow."
+            ),
+            affected=affected,
+            evidence={a.detail["appId"] or a.id: {"scopes": a.detail["scopes"], "users": len(a.detail["consentedBy"])} for a in affected},
+        )
+    ]
+
+
+@control(
+    "M365-APP-11",
+    "The admin consent workflow is not enabled",
+    "Applications",
+    permissions=("Policy.Read.All",),
+    references=(cisa("MS.AAD.5.3"), maester("EIDSCA.CR01")),
+)
+def admin_consent_workflow(t: Tenant) -> list[Finding]:
+    policy = t.admin_consent_request_policy
+    reviewers = policy.get("reviewers") or []
+    if policy.get("isEnabled") and reviewers:
+        return []
+    enabled = bool(policy.get("isEnabled"))
+    return [
+        Finding(
+            title="The admin consent workflow is switched on but has no reviewers"
+            if enabled
+            else "Users cannot ask administrators to approve an application",
+            severity="low",
+            cvss=cvss.HARDENING,
+            description=(
+                (
+                    "The admin consent workflow is enabled but names no reviewers, so a user's request to use an "
+                    "application reaches nobody."
+                    if enabled
+                    else "The admin consent workflow is off, so a user who needs an application that requires consent "
+                    "has no sanctioned way to ask for it."
+                )
+                + " Without that path, the pressure falls on administrators to re-open user consent or approve apps "
+                "ad hoc, and on users to work around the block — the conditions illicit-consent phishing relies on. "
+                "With it, every request is reviewed by named people and recorded."
+            ),
+            remediation=(
+                "In Entra admin center > Enterprise applications > Consent and permissions > Admin consent settings, "
+                "set 'Users can request admin consent to apps they are unable to consent to' to Yes, choose the "
+                "reviewers (a small group of application or security administrators), turn on e-mail notifications "
+                "and reminders, and keep user consent restricted (M365-APP-02)."
+            ),
+            affected=[
+                Affected(
+                    "tenantSetting",
+                    "adminConsentRequestPolicy",
+                    "Admin consent settings",
+                    ADMIN_CONSENT_URL,
+                    {"isEnabled": enabled, "reviewers": len(reviewers)},
+                )
+            ],
+            evidence={"isEnabled": enabled, "reviewers": reviewers, "notifyReviewers": policy.get("notifyReviewers")},
+            resource="Tenant setting: admin consent workflow",
+        )
+    ]

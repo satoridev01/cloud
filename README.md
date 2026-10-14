@@ -47,7 +47,8 @@ permissions (admin consent), all read-only:
 - `Organization.Read.All`
 - `Policy.Read.All`
 - `RoleAssignmentSchedule.Read.Directory`
-- `RoleManagement.Read.Directory`
+- `RoleManagement.Read.Directory` (also reads PIM-eligible assignments)
+- `SharePointTenantSettings.Read.All`
 - `User.Read.All`
 
 A missing permission only marks the controls that need it as `not_evaluated`, listed in
@@ -96,6 +97,9 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-TEN-01` | Tenant settings | Anyone, including guests, can invite external users | — | CISA SCuBA MS.AAD.8.2 |
 | `M365-TEN-02` | Tenant settings | Guests have the same directory access as members | — | CISA SCuBA MS.AAD.8.1 |
 | `M365-LIC-01` | Licensing | Identity protection and PIM are not licensed | — | — |
+| `M365-SHR-01` | Sharing | SharePoint and OneDrive sharing reaches beyond existing guests | — | CISA SCuBA MS.SHAREPOINT.1.1 |
+| `M365-SHR-02` | Sharing | External sharing is not limited to approved domains | — | CISA SCuBA MS.SHAREPOINT.1.3 |
+| `M365-SHR-03` | Sharing | Guests can pass on access to what was shared with them | — | — |
 | `M365-DOM-01` | Mail domains | Email domains without an enforcing DMARC policy | — | Maester MT.1182 |
 | `M365-DOM-02` | Mail domains | Email domains without a strict SPF record | — | — |
 

@@ -47,7 +47,7 @@ def admin_policy(pid="p-adm", strength=PR_STRENGTH, session=True, users=None, **
 
 def base_data(**over):
     data = {
-        "organization": [{"id": TENANT_ID, "displayName": "Contoso", "verifiedDomains": [{"name": "contoso.com", "isDefault": True}]}],
+        "organization": [{"id": TENANT_ID, "displayName": "Contoso", "verifiedDomains": [{"name": "contoso.com", "isDefault": True}, {"name": "contoso.onmicrosoft.com", "isInitial": True}]}],
         "subscribedSkus": [{"capabilityStatus": "Enabled", "servicePlans": [{"servicePlanName": "AAD_PREMIUM", "provisioningStatus": "Success"}, {"servicePlanName": "AAD_PREMIUM_P2", "provisioningStatus": "Success"}]}],
         "policies/identitySecurityDefaultsEnforcementPolicy": {"isEnabled": False},
         "identity/conditionalAccess/policies": [
@@ -65,6 +65,7 @@ def base_data(**over):
         "deviceManagement/settings": {"secureByDefault": True},
         "policies/authorizationPolicy": {"allowInvitesFrom": "adminsAndGuestInviters", "guestUserRoleId": "10dae51f-b6af-4016-8d66-8c2a99b929b3", "defaultUserRolePermissions": {"allowedToCreateApps": False, "permissionGrantPoliciesAssigned": []}},
         "policies/adminConsentRequestPolicy": {"isEnabled": True, "notifyReviewers": True, "reviewers": [{"query": "/users/u-admin1", "queryType": "MicrosoftGraph"}]},
+        "admin/sharepoint/settings": {"sharingCapability": "existingExternalUserSharingOnly", "sharingDomainRestrictionMode": "none", "isResharingByExternalUsersEnabled": False, "isRequireAcceptingUserToMatchInvitedUserEnabled": True},
         "policies/authenticationMethodsPolicy": {"authenticationMethodConfigurations": [{"id": "Fido2", "state": "enabled"}, {"id": "Sms", "state": "disabled"}]},
         "users": [
             {"id": "u-admin1", "displayName": "Admin One", "userPrincipalName": "a1@contoso.com", "userType": "Member", "accountEnabled": True},
@@ -684,6 +685,58 @@ class ConsentTests(unittest.TestCase):
         doc = assess(base_data(), forbidden={"policies/adminConsentRequestPolicy"})
         self.assertEqual(by_id(doc)["M365-APP-11"]["status"], "not_evaluated")
         self.assertIn("the admin consent request policy", doc["permissionGaps"])
+
+
+def sharing(**over):
+    data = base_data()
+    data["admin/sharepoint/settings"].update(over)
+    return data
+
+
+class SharingTests(unittest.TestCase):
+    def test_anyone_links(self):
+        f = finding(assess(sharing(sharingCapability="externalUserAndGuestSharing")), "M365-SHR-01")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("medium", 5.3))
+        self.assertIn("Anyone", f["title"])
+        self.assertTrue(f["affected"][0]["portalUrl"].startswith("https://contoso-admin.sharepoint.com/"))
+        self.assertTrue(f["references"][0]["url"].endswith("/baselines/sharepoint.md#mssharepoint11v1"))
+
+    def test_new_guests_is_low(self):
+        f = finding(assess(sharing(sharingCapability="externalUserSharingOnly")), "M365-SHR-01")
+        self.assertEqual(f["severity"], "low")
+
+    def test_settings_wrapped_in_value_are_read(self):
+        data = base_data()
+        data["admin/sharepoint/settings"] = {"value": {**data["admin/sharepoint/settings"], "sharingCapability": "externalUserAndGuestSharing"}}
+        self.assertEqual(by_id(assess(data))["M365-SHR-01"]["status"], "fail")
+
+    def test_missing_permission_is_not_evaluated(self):
+        doc = assess(base_data(), forbidden={"admin/sharepoint/settings"})
+        for cid in ("M365-SHR-01", "M365-SHR-02", "M365-SHR-03"):
+            self.assertEqual(by_id(doc)[cid]["status"], "not_evaluated", cid)
+            self.assertEqual(by_id(doc)[cid]["permissions"], ["SharePointTenantSettings.Read.All"])
+        self.assertIn("SharePoint tenant settings", doc["permissionGaps"])
+
+    def test_any_domain(self):
+        f = finding(assess(sharing(sharingCapability="externalUserSharingOnly")), "M365-SHR-02")
+        self.assertEqual(f["resource"], "SharePoint sharing: guests from any domain")
+
+    def test_block_list_still_allows_every_other_domain(self):
+        data = sharing(sharingCapability="externalUserSharingOnly", sharingDomainRestrictionMode="blockList", sharingBlockedDomainList=["gmail.com"])
+        self.assertIn("only 1 domain(s) are blocked", finding(assess(data), "M365-SHR-02")["description"])
+
+    def test_allow_list_passes(self):
+        data = sharing(sharingCapability="externalUserSharingOnly", sharingDomainRestrictionMode="allowList", sharingAllowedDomainList=["fabrikam.com"])
+        self.assertEqual(by_id(assess(data))["M365-SHR-02"]["status"], "pass")
+
+    def test_guest_resharing_and_forwarded_invitations(self):
+        f = finding(assess(sharing(isResharingByExternalUsersEnabled=True, isRequireAcceptingUserToMatchInvitedUserEnabled=False)), "M365-SHR-03")
+        self.assertEqual(len(f["resource"].split("\n")), 2)
+        self.assertIn("forwarded invitation", f["description"])
+
+    def test_resharing_is_moot_when_sharing_is_off(self):
+        data = sharing(sharingCapability="disabled", isResharingByExternalUsersEnabled=True)
+        self.assertEqual(by_id(assess(data))["M365-SHR-03"]["status"], "pass")
 
 
 class ContractTests(unittest.TestCase):

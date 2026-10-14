@@ -111,13 +111,17 @@ def control(
     return wrap
 
 
-# Current version of each SCuBA Entra ID policy: its heading, hence its anchor, carries it.
+# Current version of each SCuBA policy: its heading, hence its anchor, carries it.
 CISA_VERSIONS = {"MS.AAD.3.2": 2, "MS.AAD.3.3": 2, "MS.AAD.3.5": 2}
+
+
+CISA_BASELINES = {"MS.AAD": "aad", "MS.SHAREPOINT": "sharepoint"}
 
 
 def cisa(id: str) -> Reference:
     anchor = id.lower().replace(".", "") + f"v{CISA_VERSIONS.get(id, 1)}"
-    return Reference("CISA SCuBA", id, f"https://github.com/cisagov/ScubaGear/blob/main/PowerShell/ScubaGear/baselines/aad.md#{anchor}")
+    baseline = CISA_BASELINES[id.rsplit(".", 2)[0]]
+    return Reference("CISA SCuBA", id, f"https://github.com/cisagov/ScubaGear/blob/main/PowerShell/ScubaGear/baselines/{baseline}.md#{anchor}")
 
 
 def cis(id: str) -> Reference:

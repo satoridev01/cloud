@@ -331,6 +331,13 @@ class Tenant:
         return cache[group_id]
 
     @cached_property
+    def sharepoint_settings(self) -> dict[str, Any]:
+        """Tenant-wide SharePoint and OneDrive settings (needs SharePointTenantSettings.Read.All)."""
+        res = self._read("SharePoint tenant settings", lambda: self.graph.get("admin/sharepoint/settings"))
+        # Graph's reference shows the object wrapped in "value"; accept either shape.
+        return res["value"] if isinstance(res.get("value"), dict) else res
+
+    @cached_property
     def domains(self) -> list[dict[str, Any]]:
         return self._read("domains", lambda: list(self.graph.list("domains")))
 

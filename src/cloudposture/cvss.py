@@ -87,3 +87,4 @@ DELEGATED_DATA = vector("N", "H", "N", "R", "U", "H", "L", "N")
 OWNER_TAKEOVER = vector("N", "L", "L", "N", "C", "H", "H", "H")  # an ordinary user adds a secret and becomes the app
 OWNER_TO_DATA = vector("N", "L", "L", "N", "U", "H", "H", "N")
 COMPROMISE_INDICATOR = vector("N", "L", "N", "N", "U", "H", "L", "N")
+ANONYMOUS_LINKS = vector("N", "H", "N", "R", "U", "H", "N", "N")  # a forwarded or leaked link opens files to anyone

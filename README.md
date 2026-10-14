@@ -72,6 +72,8 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-PRV-04` | Privileged access | Inactive accounts keep privileged roles | Entra ID P1 | Maester MT.1029 |
 | `M365-PRV-05` | Privileged access | Administrators without MFA registered | Entra ID P1 | CISA SCuBA MS.AAD.3.6, Maester MT.1024.mfaRegistrationV2 |
 | `M365-PRV-06` | Privileged access | Permanent (non-PIM) assignments to highly privileged roles | Entra ID P2 | CISA SCuBA MS.AAD.7.4, CISA SCuBA MS.AAD.7.5 |
+| `M365-PRV-07` | Privileged access | Privileged roles held through groups that ordinary accounts own | Entra ID P1 | — |
+| `M365-PRV-08` | Privileged access | Permanent (non-PIM) assignments to administrator roles below Global Administrator | Entra ID P2 | CISA SCuBA MS.AAD.7.4 |
 | `M365-AUT-01` | Authentication methods | Phishable authentication methods (SMS, voice, email OTP) are enabled | — | CISA SCuBA MS.AAD.3.5, CIS Microsoft 365 Foundations 5.2.3.5, Maester EIDSCA.AV01 |
 | `M365-AUT-02` | Authentication methods | Member accounts without any MFA method registered | Entra ID P1 | Maester MT.1024.mfaRegistrationV2 |
 | `M365-AUT-03` | Authentication methods | No phishing-resistant authentication method is enabled | — | CISA SCuBA MS.AAD.3.1, Maester EIDSCA.AF01 |
@@ -91,6 +93,10 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-LIC-01` | Licensing | Identity protection and PIM are not licensed | — | — |
 | `M365-DOM-01` | Mail domains | Email domains without an enforcing DMARC policy | — | Maester MT.1182 |
 | `M365-DOM-02` | Mail domains | Email domains without a strict SPF record | — | — |
+
+The privileged-access controls read every holder of a privileged role: active and PIM-eligible
+assignments alike (an eligible role is named as eligible, never as standing access), and a role assigned
+to a group is held by each of the group's members.
 
 ## Severity
 

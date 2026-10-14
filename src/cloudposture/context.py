@@ -197,6 +197,48 @@ class Tenant:
         return [a for a in self.role_assignments if self.role_template(a) in PRIVILEGED_ROLES]
 
     @cached_property
+    def eligible_assignments(self) -> list[dict[str, Any]]:
+        """PIM-eligible directory role assignments at tenant scope: roles a principal can activate but
+        does not hold right now. PIM needs Entra ID P2, so a tenant without it has none."""
+        if not self.licences["entraIdP2"]:
+            return []
+        rows = self._read(
+            "eligible directory role assignments (PIM)",
+            lambda: list(self.graph.list("roleManagement/directory/roleEligibilityScheduleInstances?$expand=principal")),
+        )
+        return [r for r in rows if r.get("directoryScopeId", "/") == "/"]
+
+    @cached_property
+    def privileged_holders(self) -> dict[str, dict[str, Any]]:
+        """principal id → {principal, roles: {template id: [how it is held]}} for every privileged role,
+        active or PIM-eligible. A role assigned to a group is held by each user in it, so the group is
+        expanded to its members; the group itself is not a holder."""
+        out: dict[str, dict[str, Any]] = {}
+
+        def add(principal: dict[str, Any], template: str, how: str) -> None:
+            row = out.setdefault(principal["id"], {"principal": principal, "roles": {}})
+            ways = row["roles"].setdefault(template, [])
+            if how not in ways:
+                ways.append(how)
+
+        rows = [(a, "active") for a in self.privileged_assignments] + [
+            (a, "eligible") for a in self.eligible_assignments if self.role_template(a) in PRIVILEGED_ROLES
+        ]
+        for a, state in rows:
+            principal: dict[str, Any] = a.get("principal") or {"id": a.get("principalId") or ""}
+            if not principal.get("id"):
+                continue
+            template = self.role_template(a)
+            if principal_kind(principal) == "group":
+                group = principal.get("displayName") or self.group_name(principal["id"])
+                for uid in sorted(self.group_members(principal["id"])):
+                    user = {"@odata.type": "#microsoft.graph.user", **self.users.get(uid, {}), "id": uid}
+                    add(user, template, f"{state} through group {group}")
+            else:
+                add(principal, template, state)
+        return out
+
+    @cached_property
     def registration_details(self) -> dict[str, dict[str, Any]]:
         """MFA registration per user (Entra ID P1 report)."""
         rows = self._read(
@@ -258,9 +300,10 @@ class Tenant:
         return self._read("delegated permission grants", lambda: list(self.graph.list("oauth2PermissionGrants?$top=999")))
 
     def owners(self, kind: str, object_id: str) -> list[dict[str, Any]]:
-        """Owners of an application or service principal (kind = "applications" | "servicePrincipals")."""
+        """Owners of an application, service principal or group (kind = "applications" |
+        "servicePrincipals" | "groups")."""
         select = "id,displayName,userPrincipalName,accountEnabled"
-        return self._read("application owners", lambda: list(self.graph.list(f"{kind}/{object_id}/owners?$select={select}")))
+        return self._read("group owners" if kind == "groups" else "application owners", lambda: list(self.graph.list(f"{kind}/{object_id}/owners?$select={select}")))
 
     def group_members(self, group_id: str) -> set[str]:
         """Every user in a group, nested groups included (cached per group)."""

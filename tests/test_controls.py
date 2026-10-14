@@ -339,6 +339,135 @@ class PrivilegedTests(unittest.TestCase):
         self.assertGreaterEqual(f["affected"][0]["detail"]["daysInactive"], 45)
 
 
+EXCHANGE_ADMIN = "29232cdf-9323-42fd-ade2-1d097af3e4de"
+P1_ONLY = [{"capabilityStatus": "Enabled", "servicePlans": [{"servicePlanName": "AAD_PREMIUM", "provisioningStatus": "Success"}]}]
+NO_PREMIUM = [{"capabilityStatus": "Enabled", "servicePlans": [{"servicePlanName": "EXCHANGE_S_STANDARD", "provisioningStatus": "Success"}]}]
+
+
+def group_principal(gid, name):
+    return {"@odata.type": "#microsoft.graph.group", "id": gid, "displayName": name}
+
+
+def user_principal(uid, name):
+    return {"@odata.type": "#microsoft.graph.user", "id": uid, "displayName": name}
+
+
+class PrivilegedHoldersTests(unittest.TestCase):
+    def test_eligible_global_admin_counts_toward_the_minimum(self):
+        data = base_data()
+        data["roleManagement/directory/roleAssignments"] = data["roleManagement/directory/roleAssignments"][:1]
+        data["roleManagement/directory/roleEligibilityScheduleInstances"] = [
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": user_principal("u-admin2", "Admin Two")}
+        ]
+        self.assertEqual(by_id(assess(data))["M365-PRV-01"]["status"], "pass")
+
+    def test_eligible_admins_are_named_as_eligible_not_standing(self):
+        data = base_data()
+        data["roleManagement/directory/roleEligibilityScheduleInstances"] = [
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": user_principal(f"u-e{i}", f"Eligible {i}")} for i in range(7)
+        ]
+        f = finding(assess(data), "M365-PRV-01")
+        self.assertEqual(f["title"], "9 users hold Global Administrator")
+        self.assertIn("7 of them hold it only as PIM-eligible or through a group", f["description"])
+        self.assertEqual(f["evidence"]["heldAs"]["u-e0"], "eligible")
+
+    def test_group_held_role_is_expanded_to_its_members(self):
+        data = base_data(members={"g-t0": ["u-sync"]})
+        data["users"].append({"id": "u-sync", "displayName": "Synced Admin", "userPrincipalName": "sa@contoso.com", "userType": "Member", "accountEnabled": True, "onPremisesSyncEnabled": True})
+        data["roleManagement/directory/roleAssignments"].append(
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": group_principal("g-t0", "Tier 0 admins")}
+        )
+        f = finding(assess(data), "M365-PRV-03")
+        self.assertEqual(f["affected"][0]["id"], "u-sync")
+        self.assertEqual(f["affected"][0]["detail"]["heldAs"], {"Global Administrator": "active through group Tier 0 admins"})
+        self.assertIn("Global Administrator (active through group Tier 0 admins)", f["description"])
+
+    def test_unreadable_eligibility_is_not_evaluated(self):
+        doc = assess(base_data(), forbidden={"roleManagement/directory/roleEligibilityScheduleInstances"})
+        self.assertEqual(by_id(doc)["M365-PRV-01"]["status"], "not_evaluated")
+        self.assertIn("eligible directory role assignments (PIM)", doc["permissionGaps"])
+
+    def test_eligibility_is_not_read_without_p2(self):
+        data = base_data(subscribedSkus=P1_ONLY)
+        doc = assess(data, forbidden={"roleManagement/directory/roleEligibilityScheduleInstances"})
+        self.assertEqual(by_id(doc)["M365-PRV-01"]["status"], "pass")
+
+    def test_permanent_assignment_through_a_group(self):
+        data = base_data(members={"g-t0": ["u-admin1"]})
+        data["roleManagement/directory/roleAssignmentScheduleInstances"] = [
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": group_principal("g-t0", "Tier 0 admins")}
+        ]
+        f = finding(assess(data), "M365-PRV-06")
+        self.assertEqual(f["affected"][0]["detail"]["heldAs"], {"Global Administrator": "active through group Tier 0 admins"})
+
+
+class GroupOwnerTests(unittest.TestCase):
+    def data(self, owner):
+        data = base_data(owners={"g-t0": [owner]}, members={"g-t0": []})
+        data["roleManagement/directory/roleAssignments"].append(
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": group_principal("g-t0", "Tier 0 admins")}
+        )
+        return data
+
+    def test_ordinary_owner_of_a_role_group(self):
+        dev = {"@odata.type": "#microsoft.graph.user", "id": "u-dev", "displayName": "Dev", "userPrincipalName": "dev@contoso.com"}
+        f = finding(assess(self.data(dev)), "M365-PRV-07")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("critical", 9.9))
+        self.assertEqual(f["resource"], "Account: Dev (dev@contoso.com) — owner of group Tier 0 admins")
+        self.assertEqual(f["affected"][0]["detail"]["groupGrants"], ["Global Administrator"])
+
+    def test_tier1_group_is_high(self):
+        dev = {"@odata.type": "#microsoft.graph.user", "id": "u-dev", "displayName": "Dev"}
+        data = self.data(dev)
+        data["roleManagement/directory/roleAssignments"][-1]["roleDefinitionId"] = EXCHANGE_ADMIN
+        self.assertEqual(finding(assess(data), "M365-PRV-07")["severity"], "high")
+
+    def test_admin_owner_is_not_reported(self):
+        admin = {"@odata.type": "#microsoft.graph.user", "id": "u-admin1", "displayName": "Admin One"}
+        self.assertEqual(by_id(assess(self.data(admin)))["M365-PRV-07"]["status"], "pass")
+
+    def test_not_applicable_without_p1(self):
+        dev = {"@odata.type": "#microsoft.graph.user", "id": "u-dev", "displayName": "Dev"}
+        data = self.data(dev)
+        data["subscribedSkus"] = NO_PREMIUM
+        self.assertEqual(by_id(assess(data))["M365-PRV-07"]["status"], "not_applicable")
+
+    def test_unreadable_owners_are_not_evaluated(self):
+        dev = {"@odata.type": "#microsoft.graph.user", "id": "u-dev", "displayName": "Dev"}
+        doc = assess(self.data(dev), forbidden={"groups/g-t0/owners"})
+        self.assertEqual(by_id(doc)["M365-PRV-07"]["status"], "not_evaluated")
+        self.assertIn("group owners", doc["permissionGaps"])
+
+
+class PermanentTier1Tests(unittest.TestCase):
+    def test_permanent_exchange_admin(self):
+        data = base_data()
+        data["roleManagement/directory/roleAssignmentScheduleInstances"] = [
+            {"roleDefinitionId": EXCHANGE_ADMIN, "directoryScopeId": "/", "principal": user_principal("u-admin1", "Admin One")},
+            {"roleDefinitionId": GLOBAL_ADMIN, "directoryScopeId": "/", "principal": user_principal("u-admin2", "Admin Two")},
+        ]
+        doc = assess(data)
+        f = finding(doc, "M365-PRV-08")
+        self.assertEqual([a["id"] for a in f["affected"]], ["u-admin1"])
+        self.assertEqual(f["affected"][0]["detail"]["roles"], ["Exchange Administrator"])
+        # The tier-0 assignment is PRV-06's, not repeated here.
+        self.assertEqual([a["id"] for a in finding(doc, "M365-PRV-06")["affected"]], ["u-admin2"])
+
+    def test_time_bound_assignment_passes(self):
+        data = base_data()
+        data["roleManagement/directory/roleAssignmentScheduleInstances"] = [
+            {"roleDefinitionId": EXCHANGE_ADMIN, "directoryScopeId": "/", "endDateTime": "2026-10-01T00:00:00Z", "principal": user_principal("u-admin1", "Admin One")}
+        ]
+        self.assertEqual(by_id(assess(data))["M365-PRV-08"]["status"], "pass")
+
+    def test_not_applicable_without_p2(self):
+        self.assertEqual(by_id(assess(base_data(subscribedSkus=P1_ONLY)))["M365-PRV-08"]["status"], "not_applicable")
+
+    def test_unreadable_schedules_are_not_evaluated(self):
+        doc = assess(base_data(), forbidden={"roleManagement/directory/roleAssignmentScheduleInstances"})
+        self.assertEqual(by_id(doc)["M365-PRV-08"]["status"], "not_evaluated")
+
+
 class AuthAndAppsTests(unittest.TestCase):
     def test_guests_are_not_counted_for_mfa_registration(self):
         controls = by_id(assess(base_data()))

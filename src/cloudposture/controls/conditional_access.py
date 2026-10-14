@@ -769,4 +769,217 @@ def device_code(t: Tenant) -> list[Finding]:
     ]
 
 
+# Built-in "Phishing-resistant MFA" strength, and the methods any phishing-resistant strength is made of.
+PHISHING_RESISTANT_STRENGTH = "00000000-0000-0000-0000-000000000004"
+PHISHING_RESISTANT_COMBINATIONS = {"windowsHelloForBusiness", "fido2", "x509CertificateMultiFactor"}
+DEVICE_GRANTS = {"compliantDevice", "domainJoinedDevice"}
+APP_GRANTS = {"approvedApplication", "compliantApplication"}
+
+
+def requires_phishing_resistant(p: dict[str, Any]) -> bool:
+    strength = (p.get("grantControls") or {}).get("authenticationStrength") or {}
+    combos = strength.get("allowedCombinations")
+    resistant = set(combos) <= PHISHING_RESISTANT_COMBINATIONS if combos else strength.get("id") == PHISHING_RESISTANT_STRENGTH
+    # Under "require one of the selected controls", any other grant control satisfies the policy instead.
+    return bool(strength) and resistant and ((p.get("grantControls") or {}).get("operator") == "AND" or not _grants(p))
+
+
+def requires_managed_device(p: dict[str, Any]) -> bool:
+    grants = _grants(p)
+    if not grants & DEVICE_GRANTS:
+        return False
+    # "Compliant device OR approved app" is the usual way to cover phones with app protection instead.
+    return (p.get("grantControls") or {}).get("operator") == "AND" or grants <= DEVICE_GRANTS | APP_GRANTS
+
+
+def limits_sessions(p: dict[str, Any]) -> bool:
+    session = p.get("sessionControls") or {}
+    frequency = session.get("signInFrequency") or {}
+    browser = session.get("persistentBrowser") or {}
+    return bool(frequency.get("isEnabled")) or bool(browser.get("isEnabled") and browser.get("mode") == "never")
+
+
+def _held_roles(t: Tenant) -> dict[str, dict[str, int]]:
+    """Privileged role template → how many active and PIM-eligible assignments it has."""
+    held: dict[str, dict[str, int]] = {}
+    for a in t.privileged_assignments:
+        held.setdefault(t.role_template(a), {"active": 0, "eligible": 0})["active"] += 1
+    for a in t.eligible_assignments:
+        if t.role_template(a) in PRIVILEGED_ROLES:
+            held.setdefault(t.role_template(a), {"active": 0, "eligible": 0})["eligible"] += 1
+    return held
+
+
+def _roles_left(t: Tenant, policies: list[dict[str, Any]]) -> list[Affected]:
+    """The privileged roles with holders that none of these policies targets, worst tier first."""
+    covered: set[str] = set()
+    for p in policies:
+        covered.update(_cond(p, "users", "includeRoles") or [])
+    held = _held_roles(t)
+    return [
+        Affected("directoryRole", role, PRIVILEGED_ROLES[role][0], role_url(role), {"activeAssignments": n["active"], "eligibleAssignments": n["eligible"]})
+        for role, n in sorted(held.items(), key=lambda kv: (PRIVILEGED_ROLES[kv[0]][1], PRIVILEGED_ROLES[kv[0]][0]))
+        if role not in covered
+    ]
+
+
+def _holders(a: Affected) -> str:
+    parts = [f"{a.detail['activeAssignments']} active"] if a.detail["activeAssignments"] else []
+    if a.detail["eligibleAssignments"]:
+        parts.append(f"{a.detail['eligibleAssignments']} eligible")
+    return f"{a.name} ({', '.join(parts)})"
+
+
+@control(
+    "M365-CA-10",
+    "Phishing-resistant MFA is not required for administrators",
+    "Conditional Access",
+    licence="Entra ID P1",
+    permissions=PERMS + ("RoleManagement.Read.Directory",),
+    references=(cisa("MS.AAD.3.6"), cisa("MS.AAD.3.1")),
+)
+def phishing_resistant_admins(t: Tenant) -> list[Finding]:
+    strict = [p for p in t.ca_policies if enabled(p) and requires_phishing_resistant(p) and all_apps(p) and unconditional(p)]
+    if any(all_users(p) for p in strict):
+        return []
+    uncovered = _roles_left(t, strict)
+    if not uncovered:
+        return []
+    drafts = [p for p in t.ca_policies if requires_phishing_resistant(p) and p not in strict]
+    return [
+        Finding(
+            title="Administrators can sign in with MFA that a phishing proxy can relay",
+            severity="medium",
+            cvss=cvss.PHISHABLE_ADMIN_MFA,
+            description=(
+                "No enabled Conditional Access policy requires a phishing-resistant authentication strength "
+                "(passkeys / FIDO2, Windows Hello for Business or certificate-based MFA) of all users, and "
+                f"{len(uncovered)} privileged role(s) with holders are not targeted by one that requires it of "
+                "them: " + listing([_holders(a) for a in uncovered]) + ". "
+                + (
+                    "Policies that would require it are switched off, in report-only or narrowed by conditions: "
+                    + listing([f"'{p.get('displayName')}' ({p.get('state')}, {scope(p)})" for p in drafts])
+                    + ". "
+                    if drafts
+                    else ""
+                )
+                + "Push approvals, codes and SMS can all be relayed by an adversary-in-the-middle phishing page, which "
+                "captures the session after the administrator completes MFA — an attack kit sold as a service. "
+                "A passkey or a certificate is bound to the real sign-in page and cannot be relayed."
+            ),
+            remediation=(
+                "Make sure every administrator has registered a passkey, FIDO2 key, Windows Hello for Business or a "
+                "certificate (enable those methods first: Protection > Authentication methods). Then create a "
+                "Conditional Access policy: Users = Directory roles (at least the roles listed), Target resources = "
+                "All resources, Grant = Require authentication strength 'Phishing-resistant MFA', and no other "
+                "grant control alongside it under 'Require one of the selected controls'. Exclude only the "
+                "emergency-access accounts, run it in report-only to find administrators who would be locked out, "
+                "then turn it On."
+            ),
+            affected=uncovered,
+            evidence={
+                "phishingResistantPolicies": [policy_evidence(p) for p in strict],
+                "notInForce": [policy_evidence(p) for p in drafts],
+                "uncoveredRoles": {a.id: a.detail for a in uncovered},
+            },
+        )
+    ]
+
+
+@control(
+    "M365-CA-11",
+    "Sign-in is not restricted to managed (compliant or hybrid-joined) devices",
+    "Conditional Access",
+    licence="Entra ID P1",
+    permissions=PERMS,
+    references=(cisa("MS.AAD.3.7"),),
+)
+def managed_devices(t: Tenant) -> list[Finding]:
+    device = [p for p in t.ca_policies if enabled(p) and requires_managed_device(p)]
+    if any(all_users(p) and all_apps(p) and unconditional(p, allow_trusted_locations=True) for p in device):
+        return []
+    drafts = [p for p in t.ca_policies if requires_managed_device(p) and not enabled(p)]
+    partial = device + drafts
+    return [
+        Finding(
+            title="Accounts can be used from any device, including an attacker's",
+            severity="medium",
+            cvss=cvss.PHISHABLE_MFA,
+            description=(
+                "No enabled Conditional Access policy requires a compliant (Intune) or hybrid Entra-joined device "
+                "for all users and all apps. "
+                + (
+                    "The policies that do require one cover only part of the estate or are not in force: "
+                    + listing([f"'{p.get('displayName')}' ({p.get('state')}, {scope(p)})" for p in partial])
+                    + ". "
+                    if partial
+                    else ""
+                )
+                + "Without that requirement, a password and MFA response captured by a phishing proxy, or a session "
+                "token stolen by malware, works just as well from the attacker's own machine; requiring a managed "
+                "device is what makes stolen credentials useless off the organisation's devices."
+            ),
+            remediation=(
+                "Enrol the organisation's devices first (Intune compliance policies for each platform in use, or "
+                "hybrid Entra join for domain-joined Windows). Then create a Conditional Access policy: Users = All "
+                "users (exclude emergency-access accounts and, if needed, guests); Target resources = All resources; "
+                "Grant = Require device to be marked as compliant, or Require Microsoft Entra hybrid joined device "
+                "(for phones, 'Require app protection policy' alongside them). Run it in report-only, check which "
+                "sign-ins would fail, then turn it On."
+            ),
+            affected=[policy_affected(p, state=p.get("state"), scope=scope(p)) for p in partial]
+            or [Affected("tenantSetting", "managedDevices", "Conditional Access: device requirement", CA_POLICIES_URL)],
+            evidence={"devicePolicies": [policy_evidence(p) | {"platforms": _cond(p, "platforms")} for p in partial]},
+            resource=None if partial else "Conditional Access: no policy requires a managed device",
+        )
+    ]
+
+
+@control(
+    "M365-CA-12",
+    "Sign-in sessions of administrators are not limited",
+    "Conditional Access",
+    licence="Entra ID P1",
+    permissions=PERMS + ("RoleManagement.Read.Directory",),
+)
+def session_limits(t: Tenant) -> list[Finding]:
+    # A sign-in frequency on a risk policy only applies once a sign-in is flagged; it limits nothing day to day.
+    limited = [
+        p
+        for p in t.ca_policies
+        if enabled(p) and limits_sessions(p) and all_apps(p) and not (_cond(p, "userRiskLevels") or _cond(p, "signInRiskLevels"))
+    ]
+    if any(all_users(p) for p in limited):
+        return []
+    uncovered = _roles_left(t, limited)
+    if not uncovered:
+        return []
+    return [
+        Finding(
+            title="Administrator sessions stay signed in for as long as the token keeps being used",
+            severity="low",
+            cvss=cvss.HARDENING_USER,
+            description=(
+                "No enabled Conditional Access policy sets a sign-in frequency or turns off persistent browser "
+                "sessions for all users, nor for these privileged roles: "
+                + listing([_holders(a) for a in uncovered])
+                + ". Entra's default keeps a session alive for up to 90 days while it is used, so a session cookie "
+                "or refresh token stolen by infostealer malware or a phishing proxy keeps working long after the "
+                "theft, and a browser left signed in on a shared or lost device stays an administrator session."
+            ),
+            remediation=(
+                "Create a Conditional Access policy: Users = Directory roles (at least the roles listed; all users "
+                "with a longer interval if you can), Target resources = All resources, Session = Sign-in frequency "
+                "(for example every 4 to 12 hours for administrators) and Persistent browser session = Never "
+                "persistent. Exclude only the emergency-access accounts."
+            ),
+            affected=uncovered,
+            evidence={
+                "sessionPolicies": [policy_evidence(p) | {"sessionControls": p.get("sessionControls")} for p in limited],
+                "uncoveredRoles": {a.id: a.detail for a in uncovered},
+            },
+        )
+    ]
+
+
 __all__ = ["baseline_mfa", "enforces_mfa", "blocks", "has_resources", "SECURITY_DEFAULTS_URL"]

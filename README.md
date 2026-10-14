@@ -66,6 +66,9 @@ A missing permission only marks the controls that need it as `not_evaluated`, li
 | `M365-CA-07` | Conditional Access | Protective Conditional Access policies left in report-only or disabled | — | Maester MT.1184 |
 | `M365-CA-08` | Conditional Access | Risky users and risky sign-ins are not challenged or blocked | Entra ID P2 | CISA SCuBA MS.AAD.2.1, CISA SCuBA MS.AAD.2.3, Maester MT.1012, Maester MT.1024.userRiskPolicy |
 | `M365-CA-09` | Conditional Access | The device code sign-in flow is not blocked | — | Maester MT.1052 |
+| `M365-CA-10` | Conditional Access | Phishing-resistant MFA is not required for administrators | Entra ID P1 | CISA SCuBA MS.AAD.3.6, CISA SCuBA MS.AAD.3.1 |
+| `M365-CA-11` | Conditional Access | Sign-in is not restricted to managed (compliant or hybrid-joined) devices | Entra ID P1 | CISA SCuBA MS.AAD.3.7 |
+| `M365-CA-12` | Conditional Access | Sign-in sessions of administrators are not limited | Entra ID P1 | — |
 | `M365-PRV-01` | Privileged access | Global Administrator count outside 2–8 | — | CISA SCuBA MS.AAD.7.1, CIS Microsoft 365 Foundations 1.1.3, Maester MT.1024.oneAdmin |
 | `M365-PRV-02` | Privileged access | Applications (service principals) hold privileged directory roles | — | CISA SCuBA MS.AAD.7.4, Maester MT.1027 |
 | `M365-PRV-03` | Privileged access | Privileged roles held by accounts synced from on-premises | — | CISA SCuBA MS.AAD.7.3 |

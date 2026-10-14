@@ -34,6 +34,17 @@ def policy(pid, name, state="enabled", users=None, apps=None, grants=None, **con
     }
 
 
+PR_STRENGTH = {"id": "00000000-0000-0000-0000-000000000004", "displayName": "Phishing-resistant MFA", "allowedCombinations": ["windowsHelloForBusiness", "fido2", "x509CertificateMultiFactor"]}
+MFA_STRENGTH = {"id": "00000000-0000-0000-0000-000000000002", "displayName": "Multifactor authentication", "allowedCombinations": ["fido2", "password,microsoftAuthenticatorPush", "password,sms"]}
+
+
+def admin_policy(pid="p-adm", strength=PR_STRENGTH, session=True, users=None, **over):
+    p = policy(pid, "Admins: phishing-resistant MFA", users=users or {"includeUsers": [], "includeRoles": [GLOBAL_ADMIN]}, grants=[], **over)
+    p["grantControls"]["authenticationStrength"] = strength
+    p["sessionControls"] = {"signInFrequency": {"isEnabled": True, "type": "hours", "value": 4}, "persistentBrowser": {"isEnabled": True, "mode": "never"}} if session else None
+    return p
+
+
 def base_data(**over):
     data = {
         "organization": [{"id": TENANT_ID, "displayName": "Contoso", "verifiedDomains": [{"name": "contoso.com", "isDefault": True}]}],
@@ -45,6 +56,8 @@ def base_data(**over):
             policy("p-ur", "User risk", grants=["block"], userRiskLevels=["high"]),
             policy("p-sr", "Sign-in risk", grants=["mfa"], signInRiskLevels=["high", "medium"]),
             policy("p-dc", "Block device code", grants=["block"], authenticationFlows={"transferMethods": "deviceCodeFlow"}),
+            admin_policy(),
+            policy("p-dev", "Managed devices", grants=["compliantDevice", "domainJoinedDevice"]),
         ],
         "identity/conditionalAccess/namedLocations": [],
         "oauth2PermissionGrants": [],
@@ -159,7 +172,7 @@ class ConditionalAccessTests(unittest.TestCase):
 
     def test_no_mfa_policy_is_high(self):
         data = base_data()
-        data["identity/conditionalAccess/policies"] = data["identity/conditionalAccess/policies"][1:]
+        data["identity/conditionalAccess/policies"] = [p for p in data["identity/conditionalAccess/policies"] if p["id"] not in ("p-mfa", "p-adm")]
         doc = assess(data)
         self.assertEqual(finding(doc, "M365-CA-02")["severity"], "high")
         self.assertEqual(by_id(doc)["M365-CA-03"]["status"], "fail")
@@ -189,6 +202,104 @@ class ConditionalAccessTests(unittest.TestCase):
         doc = assess(data)
         self.assertEqual(by_id(doc)["M365-CA-08"]["status"], "not_applicable")
         self.assertEqual(finding(doc, "M365-LIC-01")["severity"], "info")
+
+
+def without(data, *ids):
+    data["identity/conditionalAccess/policies"] = [p for p in data["identity/conditionalAccess/policies"] if p["id"] not in ids]
+    return data
+
+
+class SignInTests(unittest.TestCase):
+    def test_phishing_resistant_mfa_for_all_users_passes(self):
+        data = without(base_data(), "p-adm")
+        data["identity/conditionalAccess/policies"].append(admin_policy("p-all", users={"includeUsers": ["All"], "includeRoles": []}))
+        self.assertEqual(by_id(assess(data))["M365-CA-10"]["status"], "pass")
+
+    def test_admins_with_ordinary_mfa_strength(self):
+        data = without(base_data(), "p-adm")
+        data["identity/conditionalAccess/policies"].append(admin_policy(strength=MFA_STRENGTH))
+        f = finding(assess(data), "M365-CA-10")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("medium", 6.8))
+        self.assertEqual(f["resource"], "Directory role: Global Administrator")
+
+    def test_strength_by_id_alone_counts(self):
+        data = base_data()
+        data["identity/conditionalAccess/policies"][-2]["grantControls"]["authenticationStrength"] = {"id": "00000000-0000-0000-0000-000000000004"}
+        self.assertEqual(by_id(assess(data))["M365-CA-10"]["status"], "pass")
+
+    def test_strength_beside_an_alternative_grant_is_not_required(self):
+        data = base_data()
+        data["identity/conditionalAccess/policies"][-2]["grantControls"]["builtInControls"] = ["compliantDevice"]
+        self.assertEqual(by_id(assess(data))["M365-CA-10"]["status"], "fail")
+
+    def test_eligible_only_role_needs_phishing_resistant_mfa_too(self):
+        data = base_data()
+        data["roleManagement/directory/roleEligibilityScheduleInstances"] = [
+            {"roleDefinitionId": "e8611ab8-c189-46e8-94e1-60213ab1f814", "directoryScopeId": "/", "principal": user_principal("u-admin1", "Admin One")}
+        ]
+        f = finding(assess(data), "M365-CA-10")
+        self.assertIn("Privileged Role Administrator (1 eligible)", f["description"])
+
+    def test_report_only_policy_is_named(self):
+        data = base_data()
+        data["identity/conditionalAccess/policies"][-2]["state"] = "enabledForReportingButNotEnforced"
+        f = finding(assess(data), "M365-CA-10")
+        self.assertIn("'Admins: phishing-resistant MFA' (enabledForReportingButNotEnforced", f["description"])
+
+    def test_sign_in_controls_not_applicable_without_p1(self):
+        controls = by_id(assess(base_data(subscribedSkus=NO_PREMIUM)))
+        for cid in ("M365-CA-10", "M365-CA-11", "M365-CA-12"):
+            self.assertEqual(controls[cid]["status"], "not_applicable", cid)
+
+    def test_sign_in_controls_not_evaluated_without_policy_read(self):
+        doc = assess(base_data(), forbidden={"identity/conditionalAccess/policies"})
+        for cid in ("M365-CA-10", "M365-CA-11", "M365-CA-12"):
+            self.assertEqual(by_id(doc)[cid]["status"], "not_evaluated", cid)
+            self.assertIn("Policy.Read.All", by_id(doc)[cid]["permissions"])
+
+    def test_no_device_requirement(self):
+        f = finding(assess(without(base_data(), "p-dev")), "M365-CA-11")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("medium", 5.9))
+        self.assertEqual(f["resource"], "Conditional Access: no policy requires a managed device")
+
+    def test_device_policy_for_one_platform_is_partial(self):
+        data = without(base_data(), "p-dev")
+        data["identity/conditionalAccess/policies"].append(
+            policy("p-win", "Windows compliant", grants=["compliantDevice"], platforms={"includePlatforms": ["windows"]})
+        )
+        f = finding(assess(data), "M365-CA-11")
+        self.assertEqual(f["affected"][0]["id"], "p-win")
+
+    def test_device_or_mfa_does_not_require_a_device(self):
+        data = without(base_data(), "p-dev")
+        data["identity/conditionalAccess/policies"].append(policy("p-or", "Device or MFA", grants=["compliantDevice", "mfa"]))
+        self.assertEqual(by_id(assess(data))["M365-CA-11"]["status"], "fail")
+
+    def test_device_and_mfa_requires_a_device(self):
+        data = without(base_data(), "p-dev")
+        p = policy("p-and", "Device and MFA", grants=["compliantDevice", "mfa"])
+        p["grantControls"]["operator"] = "AND"
+        data["identity/conditionalAccess/policies"].append(p)
+        self.assertEqual(by_id(assess(data))["M365-CA-11"]["status"], "pass")
+
+    def test_no_session_limit_for_admins(self):
+        data = without(base_data(), "p-adm")
+        data["identity/conditionalAccess/policies"].append(admin_policy(session=False))
+        f = finding(assess(data), "M365-CA-12")
+        self.assertEqual((f["severity"], f["cvss"]["score"]), ("low", 3.1))
+        self.assertEqual([a["name"] for a in f["affected"]], ["Global Administrator"])
+
+    def test_sign_in_frequency_on_a_risk_policy_does_not_count(self):
+        data = without(base_data(), "p-adm")
+        data["identity/conditionalAccess/policies"].append(admin_policy(session=False))
+        risky = data["identity/conditionalAccess/policies"][2]
+        risky["sessionControls"] = {"signInFrequency": {"isEnabled": True, "frequencyInterval": "everyTime"}}
+        self.assertEqual(by_id(assess(data))["M365-CA-12"]["status"], "fail")
+
+    def test_never_persistent_browser_for_all_users_passes(self):
+        data = without(base_data(), "p-adm")
+        data["identity/conditionalAccess/policies"][0]["sessionControls"] = {"persistentBrowser": {"isEnabled": True, "mode": "never"}}
+        self.assertEqual(by_id(assess(data))["M365-CA-12"]["status"], "pass")
 
 
 VENDOR = "99999999-0000-0000-0000-000000000000"
